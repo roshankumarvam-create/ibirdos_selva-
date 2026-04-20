@@ -1,5 +1,10 @@
-export default function Home() {
-  return (
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  output: "export",
+};
+
+export default nextConfig;
     <div style={{ fontFamily: 'Inter, sans-serif', background: '#F8FAFC', minHeight: '100vh' }}>
 
       {/* HERO BANNER — food image with overlay */}
