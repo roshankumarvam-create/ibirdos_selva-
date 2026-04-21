@@ -1,277 +1,342 @@
-import type { Metadata } from 'next'
-import './globals.css'
-import { ACTIVE_SESSION, PERMISSIONS } from './lib/auth'
+import type { Metadata } from "next";
+
 export const metadata: Metadata = {
-  title: 'iBirdOS — Restaurant Intelligence',
-  description: 'AI-powered restaurant operating system',
-}
+  title: "iBirdOS",
+  description: "Work smarter, together.",
+  icons: {
+    icon: "/favicon.ico",
+  },
+};
 
-// ── iBirdOS Role + Unit model (server-safe, no hooks) ──
-const MOCK_USER = {
-  name: 'Simbu Selvarasu',
-  initials: 'SS',
-  email: 'CEO@prosperityaxis.com',
-  role: 'OWNER',
-  tier: 'Restaurant',
-  unit_id: 'RS-10001',
-  unit_name: 'Cafe 71',
-  tier_color: '#2563EB',
-}
+const navSections = [
+  {
+    title: "Overview",
+    defaultOpen: true,
+    items: [
+      { label: "Dashboard", href: "/" },
+      { label: "Daily Sales", href: "/sales" },
+      { label: "My Orders", href: "/orders" },
+      { label: "Finance & P&L", href: "/finance" },
+      { label: "Reports", href: "/reports" },
+      { label: "Roadmap", href: "/roadmap" },
+    ],
+  },
+  {
+    title: "AI Modules",
+    defaultOpen: false,
+    items: [
+      { label: "Voice Orders", href: "/customer" },
+      { label: "FDA Alerts", href: "/fda-alerts" },
+      { label: "Invoices", href: "/invoices" },
+      { label: "Waste Log", href: "/waste" },
+      { label: "Marketing AI", href: "/customer" },
+      { label: "SEO & Reviews", href: "/customer" },
+      { label: "Poster Designer", href: "/customer" },
+    ],
+  },
+  {
+    title: "Operations",
+    defaultOpen: false,
+    items: [
+      { label: "Customer", href: "/customer" },
+      { label: "Purchasing", href: "/purchasing" },
+      { label: "Vendors", href: "/vendors" },
+    ],
+  },
+  {
+    title: "Culinary",
+    defaultOpen: false,
+    items: [
+      { label: "Recipes", href: "/recipes" },
+      { label: "Menu Works", href: "/menu" },
+      { label: "Yield Log", href: "/yield" },
+      { label: "Production", href: "/production" },
+    ],
+  },
+  {
+    title: "Settings",
+    defaultOpen: false,
+    items: [
+      { label: "Integrations", href: "/integrations" },
+      { label: "Team & Roles", href: "/customer" },
+      { label: "Settings", href: "/customer" },
+    ],
+  },
+];
 
-// Nav items filtered by role
-// OWNER sees everything except IB_ADMIN tools
-// STAFF sees only Orders + Waste
-// SOLO sees their own unit only
-const NAV = {
-  overview: [
-    { name: 'Dashboard',     href: '/',        roles: ['OWNER','MANAGER','SOLO','MU_DIRECTOR','FR_OWNER','EN_ADMIN','CAFE','LOUNGE','SCHOOL_DIR','CORP_DINING'] },
-    { name: 'Daily Sales',   href: '/sales',   roles: ['OWNER','MANAGER','SOLO','CAFE','LOUNGE','SCHOOL_DIR','CORP_DINING'] },
-    { name: 'Finance & P&L', href: '/finance', roles: ['OWNER','SOLO','MU_DIRECTOR','FR_OWNER','EN_ADMIN','EN_FINANCE','CAFE','LOUNGE','SCHOOL_DIR','CORP_DINING'] },
-    { name: 'Reports',       href: '/reports', roles: ['OWNER','MANAGER','SOLO','MU_DIRECTOR','FR_OWNER','EN_ADMIN','EN_FINANCE'] },
-    { name: 'Roadmap',       href: '/roadmap', roles: ['OWNER','EN_ADMIN','IB_ADMIN'] },
-  ],
-  ai_modules: [
-    { name: 'Voice Orders',    href: '/voice-orders',  badge: 'Live', badgeColor: '#052E16', badgeText: '#86EFAC', roles: ['OWNER','MANAGER','STAFF','SOLO','CAFE','LOUNGE'] },
-    { name: 'FDA Alerts',      href: '/fda-alerts',    badge: '2',    badgeColor: '#450A0A', badgeText: '#FCA5A5', roles: ['OWNER','MANAGER','SOLO','CAFE','LOUNGE','SCHOOL_DIR','CORP_DINING'] },
-    { name: 'Invoices',        href: '/invoices',      badge: null,   roles: ['OWNER','MANAGER','SOLO','CAFE','LOUNGE'] },
-    { name: 'Waste Log',       href: '/waste',         badge: null,   roles: ['OWNER','MANAGER','STAFF','CHEF','SOLO','CAFE','LOUNGE','SCHOOL_DIR','CORP_DINING'] },
-    { name: 'Marketing AI',    href: '/marketing',     badge: null,   roles: ['OWNER','SOLO','MU_DIRECTOR','FR_OWNER','EN_ADMIN','CAFE','LOUNGE'] },
-    { name: 'SEO & Reviews',   href: '/seo',           badge: null,   roles: ['OWNER','SOLO','MU_DIRECTOR','FR_OWNER','CAFE','LOUNGE'] },
-    { name: 'Poster Designer', href: '/poster',        badge: 'New',  badgeColor: '#1E1B4B', badgeText: '#A5B4FC', roles: ['OWNER','SOLO','MU_DIRECTOR','FR_OWNER','CAFE','LOUNGE'] },
-  ],
-  culinary: [
-    { name: 'Recipes',     href: '/recipes',     badge: null, roles: ['OWNER','MANAGER','STAFF','CHEF','SOLO','CAFE','LOUNGE','SCHOOL_DIR','CORP_DINING'] },
-    { name: 'Menu Works',  href: '/menu',        badge: null, roles: ['OWNER','MANAGER','SOLO','CAFE','LOUNGE','SCHOOL_DIR','CORP_DINING'] },
-    { name: 'Yield Log',   href: '/yield',       badge: null, roles: ['OWNER','MANAGER','STAFF','CHEF','SOLO'] },
-    { name: 'Production',  href: '/production',  badge: null, roles: ['OWNER','MANAGER','STAFF','CHEF','SOLO','SCHOOL_DIR','CORP_DINING'] },
-  ],
-  multi_unit: [
-    { name: 'All Units',      href: '/units',      badge: null, roles: ['MU_DIRECTOR','FR_OWNER','FR_CORP','EN_ADMIN','EN_FINANCE','IB_ADMIN'] },
-    { name: 'Unit Compare',   href: '/compare',    badge: null, roles: ['MU_DIRECTOR','FR_OWNER','EN_ADMIN','IB_ADMIN'] },
-    { name: 'Flash Reports',  href: '/flash',      badge: null, roles: ['MU_DIRECTOR','FR_OWNER','FR_CORP','EN_ADMIN','EN_FINANCE','IB_ADMIN'] },
-  ],
-  settings: [
-    { name: 'Integrations', href: '/integrations', roles: ['OWNER','EN_ADMIN','MU_DIRECTOR','IB_ADMIN'] },
-    { name: 'Team & Roles', href: '/team',         roles: ['OWNER','EN_ADMIN','MU_DIRECTOR','IB_ADMIN'] },
-    { name: 'Settings',     href: '/settings',     roles: ['OWNER','SOLO','EN_ADMIN','IB_ADMIN'] },
-  ],
-}
-
-// Tier color map
-const TIER_COLORS: Record<string, string> = {
-  'Solo Chef':       '#8B5CF6',
-  'Restaurant':      '#2563EB',
-  'Multi Unit':      '#059669',
-  'Franchise':       '#D97706',
-  'Enterprise':      '#DC2626',
-  'School Dining':   '#06B6D4',
-  'Corporate Dining':'#EC4899',
-  'Lounge & Bar':    '#F97316',
-  'Cafe':            '#10B981',
-  'iBirdOS Admin':   '#EF4444',
-}
-
-// Section label component (server-side only, no state)
-function NavSection({ label }: { label: string }) {
-  return (
-    <div style={{
-      fontSize: '10px', fontWeight: '600', color: '#334155',
-      textTransform: 'uppercase' as const, letterSpacing: '0.08em',
-      padding: '16px 8px 6px'
-    }}>{label}</div>
-  )
-}
-
-function NavLink({ name, href, badge, badgeColor, badgeText }: {
-  name: string; href: string;
-  badge?: string | null;
-  badgeColor?: string;
-  badgeText?: string;
-}) {
-  return (
-    <a href={href} style={{
-      display: 'flex', alignItems: 'center',
-      justifyContent: 'space-between',
-      padding: '9px 10px', borderRadius: '6px',
-      color: '#94A3B8', fontSize: '13px',
-      cursor: 'pointer', marginBottom: '2px',
-      textDecoration: 'none',
-    }}>
-      <span>{name}</span>
-      {badge && (
-        <span style={{
-          background: badgeColor || '#1E2A45',
-          color: badgeText || '#94A3B8',
-          fontSize: '10px', fontWeight: '600',
-          padding: '1px 6px', borderRadius: '20px'
-        }}>{badge}</span>
-      )}
-    </a>
-  )
-}
-
-// Which nav sections to show for this role
-const ROLE = MOCK_USER.role
-const showMultiUnit = ['MU_DIRECTOR','FR_OWNER','FR_CORP','EN_ADMIN','EN_FINANCE','IB_ADMIN'].includes(ROLE)
-const showCulinary = ['OWNER','MANAGER','STAFF','CHEF','SOLO','CAFE','LOUNGE','SCHOOL_DIR','CORP_DINING'].includes(ROLE)
-
-export default function RootLayout({ children }: { children: React.ReactNode }) {
-  const tierColor = TIER_COLORS[MOCK_USER.tier] || '#2563EB'
-
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
   return (
     <html lang="en">
-      <head>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
-      </head>
       <body
-        style={{ fontFamily: 'Inter, sans-serif', margin: 0, background: '#060D1A' }}
-        suppressHydrationWarning={true}
+        style={{
+          margin: 0,
+          fontFamily: "Inter, Arial, sans-serif",
+          background: "#F8FAFC",
+          color: "#0F172A",
+        }}
       >
-        <div style={{ display: 'flex' }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "260px 1fr",
+            minHeight: "100vh",
+          }}
+        >
+          <aside
+            style={{
+              background: "#FFFFFF",
+              borderRight: "1px solid #E2E8F0",
+              padding: "20px 16px",
+              position: "sticky",
+              top: 0,
+              height: "100vh",
+              overflowY: "auto",
+              boxSizing: "border-box",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "12px",
+                marginBottom: "20px",
+              }}
+            >
+              <img
+                src="/logo.png"
+                alt="iBirdOS logo"
+                style={{
+                  width: "52px",
+                  height: "52px",
+                  objectFit: "contain",
+                  borderRadius: "12px",
+                  background: "#FFFFFF",
+                  padding: "4px",
+                  boxShadow: "0 4px 12px rgba(15, 23, 42, 0.08)",
+                }}
+              />
 
-          {/* ── SIDEBAR ── */}
-          <div style={{
-            width: '240px',
-            background: '#0A0F1E',
-            minHeight: '100vh',
-            position: 'fixed',
-            top: 0, left: 0, bottom: 0,
-            borderRight: '1px solid #1E2A45',
-            display: 'flex',
-            flexDirection: 'column',
-            zIndex: 100
-          }}>
-
-            {/* Logo + unit badge */}
-            <div style={{ padding: '20px 20px 16px', borderBottom: '1px solid #1E2A45' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
-                <div style={{
-                  width: '30px', height: '30px', borderRadius: '7px',
-                  background: 'linear-gradient(135deg,#2563EB,#7C3AED)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: '16px', flexShrink: 0
-                }}>🐦</div>
-                <div>
-                  <div style={{ fontSize: '18px', fontWeight: '700', color: '#FFFFFF', lineHeight: 1 }}>iBirdOS</div>
-                  <div style={{ fontSize: '10px', color: '#475569', marginTop: '2px' }}>Restaurant Intelligence</div>
+              <div>
+                <div
+                  style={{
+                    fontSize: "22px",
+                    fontWeight: 800,
+                    color: "#0F172A",
+                    lineHeight: 1.1,
+                  }}
+                >
+                  iBirdOS
                 </div>
-              </div>
-
-              {/* Active unit pill */}
-              <div style={{
-                background: '#060D1A', border: `1px solid ${tierColor}40`,
-                borderRadius: '8px', padding: '8px 10px'
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
-                  <span style={{
-                    fontSize: '10px', fontWeight: '700',
-                    padding: '2px 7px', borderRadius: '4px',
-                    background: tierColor, color: 'white'
-                  }}>{MOCK_USER.tier}</span>
-                  <code style={{
-                    fontSize: '10px', fontWeight: '700',
-                    color: tierColor,
-                    background: `${tierColor}15`,
-                    padding: '2px 6px', borderRadius: '4px'
-                  }}>{MOCK_USER.unit_id}</code>
+                <div
+                  style={{
+                    fontSize: "12px",
+                    color: "#64748B",
+                    marginTop: "4px",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  Work smarter, together.
                 </div>
-                <div style={{ fontSize: '12px', fontWeight: '600', color: '#E2E8F0' }}>{MOCK_USER.unit_name}</div>
               </div>
             </div>
 
-            {/* Nav */}
-            <nav style={{ padding: '8px 12px', flex: 1, overflowY: 'auto' }}>
+            <div
+              style={{
+                background: "#F8FAFC",
+                border: "1px solid #E2E8F0",
+                borderRadius: "18px",
+                padding: "18px",
+                marginBottom: "18px",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  marginBottom: "14px",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    color: "#4F46E5",
+                    background: "#EEF2FF",
+                    padding: "6px 10px",
+                    borderRadius: "999px",
+                  }}
+                >
+                  Restaurant
+                </span>
 
-              <NavSection label="Overview" />
-              {NAV.overview
-                .filter(i => i.roles.includes(ROLE))
-                .map(i => <NavLink key={i.href} {...i} />)}
+                <span
+                  style={{
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    color: "#475569",
+                    background: "#F1F5F9",
+                    padding: "6px 10px",
+                    borderRadius: "999px",
+                  }}
+                >
+                  RS-10001
+                </span>
+              </div>
 
-              <NavSection label="AI Modules" />
-              {NAV.ai_modules
-                .filter(i => i.roles.includes(ROLE))
-                .map(i => <NavLink key={i.href} {...i} />)}
+              <div
+                style={{
+                  fontSize: "18px",
+                  fontWeight: 800,
+                  color: "#0F172A",
+                }}
+              >
+                Cafe 71
+              </div>
+            </div>
 
-              {showCulinary && (
-                <>
-                  <NavSection label="Culinary" />
-                  {NAV.culinary
-                    .filter(i => i.roles.includes(ROLE))
-                    .map(i => <NavLink key={i.href} {...i} />)}
-                </>
-              )}
+            <nav style={{ display: "grid", gap: "10px" }}>
+              {navSections.map((section) => (
+                <details
+                  key={section.title}
+                  open={section.defaultOpen}
+                  style={{
+                    background: "#FFFFFF",
+                    border: "1px solid #E2E8F0",
+                    borderRadius: "14px",
+                    overflow: "hidden",
+                  }}
+                >
+                  <summary
+                    style={{
+                      listStyle: "none",
+                      cursor: "pointer",
+                      padding: "14px 14px",
+                      fontSize: "12px",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.08em",
+                      color: "#64748B",
+                      fontWeight: 800,
+                      background: "#F8FAFC",
+                    }}
+                  >
+                    {section.title}
+                  </summary>
 
-              {showMultiUnit && (
-                <>
-                  <NavSection label="Multi-Unit" />
-                  {NAV.multi_unit
-                    .filter(i => i.roles.includes(ROLE))
-                    .map(i => <NavLink key={i.href} {...i} />)}
-                </>
-              )}
-
-              <NavSection label="Settings" />
-              {NAV.settings
-                .filter(i => i.roles.includes(ROLE))
-                .map(i => <NavLink key={i.href} {...i} />)}
-
+                  <div
+                    style={{
+                      display: "grid",
+                      gap: "4px",
+                      padding: "10px",
+                    }}
+                  >
+                    {section.items.map((item) => (
+                      <a
+                        key={item.label}
+                        href={item.href}
+                        style={{
+                          textDecoration: "none",
+                          color: "#0F172A",
+                          fontSize: "15px",
+                          fontWeight: 600,
+                          padding: "10px 12px",
+                          borderRadius: "10px",
+                          display: "block",
+                          background: "#FFFFFF",
+                        }}
+                      >
+                        {item.label}
+                      </a>
+                    ))}
+                  </div>
+                </details>
+              ))}
             </nav>
+          </aside>
 
-            {/* User footer */}
-            <div style={{ padding: '14px 16px', borderTop: '1px solid #1E2A45' }}>
-
-              {/* Avatar + name */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
-                <div style={{
-                  width: '32px', height: '32px', borderRadius: '50%',
-                  background: `${tierColor}30`,
-                  border: `1px solid ${tierColor}60`,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: '12px', fontWeight: '700', color: tierColor,
-                  flexShrink: 0
-                }}>{MOCK_USER.initials}</div>
-                <div style={{ overflow: 'hidden' }}>
-                  <div style={{ fontSize: '13px', fontWeight: '500', color: '#FFFFFF', whiteSpace: 'nowrap' as const, overflow: 'hidden', textOverflow: 'ellipsis' }}>{MOCK_USER.name}</div>
-                  <div style={{ fontSize: '10px', color: '#475569' }}>{MOCK_USER.email}</div>
+          <main
+            style={{
+              background: "#F8FAFC",
+            }}
+          >
+            <div
+              style={{
+                position: "sticky",
+                top: 0,
+                zIndex: 20,
+                background: "rgba(248,250,252,0.95)",
+                backdropFilter: "blur(8px)",
+                borderBottom: "1px solid #E2E8F0",
+                padding: "16px 28px",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <div>
+                <div
+                  style={{
+                    fontSize: "16px",
+                    fontWeight: 800,
+                    color: "#0F172A",
+                  }}
+                >
+                  iBirdOS Workspace
+                </div>
+                <div
+                  style={{
+                    fontSize: "13px",
+                    color: "#64748B",
+                    marginTop: "4px",
+                  }}
+                >
+                  AI-powered operating system for restaurant control
                 </div>
               </div>
 
-              {/* Role + unit badges */}
-              <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' as const, marginBottom: '10px' }}>
-                <span style={{
-                  fontSize: '10px', fontWeight: '700',
-                  padding: '2px 8px', borderRadius: '4px',
-                  background: tierColor, color: 'white'
-                }}>{MOCK_USER.role}</span>
-                <span style={{
-                  fontSize: '10px', fontWeight: '600',
-                  padding: '2px 8px', borderRadius: '4px',
-                  background: '#1E2A45', color: '#93C5FD'
-                }}>{MOCK_USER.unit_id}</span>
+              <div style={{ display: "flex", gap: "12px" }}>
+                <a
+                  href="/notifications"
+                  style={{
+                    border: "1px solid #E2E8F0",
+                    background: "#FFFFFF",
+                    color: "#334155",
+                    borderRadius: "12px",
+                    padding: "10px 16px",
+                    fontSize: "14px",
+                    fontWeight: 600,
+                    textDecoration: "none",
+                    display: "inline-block",
+                  }}
+                >
+                  Notifications
+                </a>
+
+                <a
+                  href="/customer"
+                  style={{
+                    background: "#6366F1",
+                    color: "#FFFFFF",
+                    borderRadius: "12px",
+                    padding: "10px 16px",
+                    fontSize: "14px",
+                    fontWeight: 700,
+                    textDecoration: "none",
+                    display: "inline-block",
+                  }}
+                >
+                  New Action
+                </a>
               </div>
-
-              {/* Sign out / switch */}
-              <a href="/login" style={{
-                display: 'block',
-                textAlign: 'center' as const,
-                fontSize: '12px', color: '#334155',
-                textDecoration: 'none',
-                padding: '7px',
-                borderRadius: '6px',
-                border: '1px solid #1E2A45',
-                background: '#060D1A',
-              }}>Switch Account / Sign Out</a>
-
             </div>
-          </div>
 
-          {/* ── PAGE CONTENT ── */}
-          <div style={{ marginLeft: '240px', flex: 1, minHeight: '100vh' }}>
-            {children}
-          </div>
-
+            <div style={{ padding: "28px" }}>{children}</div>
+          </main>
         </div>
       </body>
     </html>
-  )
+  );
 }
