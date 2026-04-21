@@ -4,7 +4,8 @@ Private Next.js frontend for iBirdOS, deployed on **Azure Static Web Apps**. Bac
 
 ## Local Development
 
+Install dependencies and start the development server:
+
 ```bash
 npm install
-cp .env.example .env.local
 npm run dev
