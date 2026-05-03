@@ -16,27 +16,36 @@ jobs:
     name: Build and Deploy Job
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
+          lfs: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Build static export
-        run: npm run build
-
-      - name: Deploy to Azure Static Web Apps
+      - name: Build And Deploy
         uses: Azure/static-web-apps-deploy@v1
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           action: "upload"
-          app_location: "out"
-          output_location: ""
-          skip_app_build: true
+          ###### Repository/Build Configurations ######
+          app_location: "/" # App source code path (root)
+          api_location: "" # Api source code path - optional
+          output_location: ".next" # Built app content directory
+          ###### End of Repository/Build Configurations ######
+        env:
+          # Add your environment variables here
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
 
   close_pull_request_job:
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
