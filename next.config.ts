@@ -1,3 +1,5 @@
+import type { NextConfig } from "next";
+
 const securityHeaders = [
   {
     key: "X-Content-Type-Options",
@@ -17,8 +19,17 @@ const securityHeaders = [
   },
   {
     key: "Content-Security-Policy",
-    value:
-      "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+    value: [
+      "default-src 'self'",
+      "img-src 'self' data: https:",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "font-src 'self' https://fonts.gstatic.com",
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval'", // Required for React/Next.js
+      "connect-src 'self' https://api.fda.gov https://api.anthropic.com https://api.yelp.com https://mybusiness.googleapis.com https://quickbooks.api.intuit.com", // API endpoints
+      "frame-ancestors 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+    ].join("; "),
   },
   {
     key: "Strict-Transport-Security",
@@ -26,9 +37,14 @@ const securityHeaders = [
   },
 ];
 
-const nextConfig = {
-  output: "export",
+const nextConfig: NextConfig = {
+  // CRITICAL: Remove 'output: export' to enable API routes
+  // Use 'standalone' for production deployments
+  output: process.env.NODE_ENV === 'production' ? 'standalone' : undefined,
+  
+  reactStrictMode: true,
   poweredByHeader: false,
+  
   async headers() {
     return [
       {
@@ -36,6 +52,22 @@ const nextConfig = {
         headers: securityHeaders,
       },
     ];
+  },
+
+  // Allow images from external sources if needed
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: '**',
+      },
+    ],
+    unoptimized: process.env.NODE_ENV === 'production', // For Azure Static Web Apps
+  },
+
+  // Environment variables available to browser
+  env: {
+    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000',
   },
 };
 
