@@ -24,8 +24,8 @@ const securityHeaders = [
       "img-src 'self' data: https:",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com",
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval'", // Required for React/Next.js
-      "connect-src 'self' https://api.fda.gov https://api.anthropic.com https://api.yelp.com https://mybusiness.googleapis.com https://quickbooks.api.intuit.com", // API endpoints
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+      "connect-src 'self' https://api.fda.gov https://api.anthropic.com https://api.yelp.com https://mybusiness.googleapis.com https://quickbooks.api.intuit.com",
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",
@@ -38,8 +38,6 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
-  // CRITICAL: Remove 'output: export' to enable API routes
-  // Use 'standalone' for production deployments
   output: process.env.NODE_ENV === 'production' ? 'standalone' : undefined,
   
   reactStrictMode: true,
@@ -54,7 +52,6 @@ const nextConfig: NextConfig = {
     ];
   },
 
-  // Allow images from external sources if needed
   images: {
     remotePatterns: [
       {
@@ -62,10 +59,9 @@ const nextConfig: NextConfig = {
         hostname: '**',
       },
     ],
-    unoptimized: process.env.NODE_ENV === 'production', // For Azure Static Web Apps
+    unoptimized: process.env.NODE_ENV === 'production',
   },
 
-  // Environment variables available to browser
   env: {
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000',
   },
