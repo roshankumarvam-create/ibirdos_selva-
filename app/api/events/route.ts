@@ -14,6 +14,19 @@ const sql = postgres(databaseUrl, {
   ssl: databaseUrl.includes("localhost") ? false : "require",
 });
 
+type RouteContext = {
+  params: Promise<{
+    eventId: string;
+  }>;
+};
+
+type CurrentUser = {
+  id: string;
+  email: string;
+  role?: string;
+  company_id: string;
+};
+
 type EventRow = {
   id: string;
   company_id: string;
@@ -32,7 +45,25 @@ type EventRow = {
   updated_at: string | null;
 };
 
-type CreateEventBody = {
+type EventResponse = {
+  id: string;
+  companyId: string;
+  name: string;
+  eventName: string;
+  eventDate: string;
+  guestCount: number;
+  status: string;
+  menuId: string | null;
+  serviceType: string;
+  totalCost: number;
+  revenue: number;
+  foodCost: number;
+  margin: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+type UpdateEventBody = {
   name?: unknown;
   eventName?: unknown;
   event_name?: unknown;
@@ -41,9 +72,78 @@ type CreateEventBody = {
   event_date?: unknown;
   guestCount?: unknown;
   guest_count?: unknown;
+  status?: unknown;
   serviceType?: unknown;
   service_type?: unknown;
+  revenue?: unknown;
+  foodCost?: unknown;
+  food_cost?: unknown;
+  totalCost?: unknown;
+  total_cost?: unknown;
+  margin?: unknown;
 };
+
+function getString(value: unknown): string | null {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value.trim();
+  }
+
+  return null;
+}
+
+function getNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsedValue = Number(value);
+
+    if (Number.isFinite(parsedValue)) {
+      return parsedValue;
+    }
+  }
+
+  return null;
+}
+
+function numberFromValue(value: string | number | null): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsedValue = Number(value);
+
+    if (Number.isFinite(parsedValue)) {
+      return parsedValue;
+    }
+  }
+
+  return 0;
+}
+
+function mapEvent(row: EventRow): EventResponse {
+  const eventName = row.event_name ?? row.name ?? "Untitled Event";
+
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    name: row.name ?? eventName,
+    eventName,
+    eventDate: row.event_date ?? "",
+    guestCount: numberFromValue(row.guest_count),
+    status: row.status ?? "draft",
+    menuId: row.menu_id,
+    serviceType: row.service_type ?? "catering",
+    totalCost: numberFromValue(row.total_cost),
+    revenue: numberFromValue(row.revenue),
+    foodCost: numberFromValue(row.food_cost),
+    margin: numberFromValue(row.margin),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
@@ -54,126 +154,65 @@ function getErrorMessage(error: unknown): string {
     return JSON.stringify(error);
   }
 
-  return "Unknown events API error";
+  return "Unknown event detail error";
 }
 
-function getString(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmed = value.trim();
-
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function getNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (typeof value === "string") {
-    const parsed = Number(value.replace(/[$,%]/g, ""));
-
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-
-  return null;
-}
-
-function mapEvent(row: EventRow) {
-  return {
-    id: row.id,
-    company_id: row.company_id,
-    companyId: row.company_id,
-    name: row.name ?? row.event_name ?? "Untitled Event",
-    eventName: row.event_name ?? row.name ?? "Untitled Event",
-    event_name: row.event_name ?? row.name ?? "Untitled Event",
-    event_date: row.event_date,
-    eventDate: row.event_date,
-    guest_count: row.guest_count,
-    guestCount: row.guest_count,
-    status: row.status ?? "DRAFT",
-    menu_id: row.menu_id,
-    menuId: row.menu_id,
-    service_type: row.service_type,
-    serviceType: row.service_type,
-    total_cost: row.total_cost,
-    totalCost: row.total_cost,
-    revenue: row.revenue,
-    food_cost: row.food_cost,
-    foodCost: row.food_cost,
-    margin: row.margin,
-    created_at: row.created_at,
-    createdAt: row.created_at,
-    updated_at: row.updated_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-async function ensureEventCoreColumns(): Promise<void> {
-  await sql`
-    CREATE EXTENSION IF NOT EXISTS pgcrypto;
-  `;
-
-  await sql`
-    CREATE TABLE IF NOT EXISTS events (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      company_id UUID NOT NULL,
-      name TEXT,
-      event_name TEXT,
-      event_date TIMESTAMPTZ,
-      guest_count NUMERIC DEFAULT 0,
-      status TEXT DEFAULT 'DRAFT',
-      menu_id UUID,
-      service_type TEXT,
-      total_cost NUMERIC DEFAULT 0,
-      revenue NUMERIC DEFAULT 0,
-      food_cost NUMERIC DEFAULT 0,
-      margin NUMERIC DEFAULT 0,
-      created_at TIMESTAMPTZ DEFAULT NOW(),
-      updated_at TIMESTAMPTZ DEFAULT NOW()
-    );
-  `;
-
+async function ensureEventDetailColumns(): Promise<void> {
   await sql`
     ALTER TABLE events
-    ADD COLUMN IF NOT EXISTS company_id UUID,
     ADD COLUMN IF NOT EXISTS name TEXT,
     ADD COLUMN IF NOT EXISTS event_name TEXT,
-    ADD COLUMN IF NOT EXISTS event_date TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS guest_count NUMERIC DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'DRAFT',
+    ADD COLUMN IF NOT EXISTS event_date DATE,
+    ADD COLUMN IF NOT EXISTS guest_count INTEGER DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'draft',
     ADD COLUMN IF NOT EXISTS menu_id UUID,
-    ADD COLUMN IF NOT EXISTS service_type TEXT,
+    ADD COLUMN IF NOT EXISTS service_type TEXT DEFAULT 'catering',
     ADD COLUMN IF NOT EXISTS total_cost NUMERIC DEFAULT 0,
     ADD COLUMN IF NOT EXISTS revenue NUMERIC DEFAULT 0,
     ADD COLUMN IF NOT EXISTS food_cost NUMERIC DEFAULT 0,
     ADD COLUMN IF NOT EXISTS margin NUMERIC DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
-    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
-  `;
-
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_events_company_id
-    ON events(company_id);
-  `;
-
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_events_event_date
-    ON events(event_date);
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW(),
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
   `;
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(
+  request: NextRequest,
+  context: RouteContext,
+): Promise<NextResponse> {
+  void request;
+
   try {
-    await ensureEventCoreColumns();
+    await ensureEventDetailColumns();
 
-    const currentUser = await getCurrentUser();
+    const currentUser = (await getCurrentUser()) as CurrentUser | null;
+    const { eventId } = await context.params;
 
-    const rows = await sql`
+    if (!currentUser?.company_id) {
+      return NextResponse.json(
+        {
+          success: false,
+          event: null,
+          data: null,
+          error: "Unauthorized",
+        },
+        { status: 401 },
+      );
+    }
+
+    if (!eventId) {
+      return NextResponse.json(
+        {
+          success: false,
+          event: null,
+          data: null,
+          error: "Missing event id",
+        },
+        { status: 400 },
+      );
+    }
+
+    const rows = (await sql`
       SELECT
         id,
         company_id,
@@ -191,25 +230,40 @@ export async function GET(): Promise<NextResponse> {
         created_at::text AS created_at,
         updated_at::text AS updated_at
       FROM events
-      WHERE company_id::text = ${currentUser.company_id}
-      ORDER BY event_date DESC NULLS LAST, created_at DESC NULLS LAST;
-    `;
+      WHERE id = ${eventId}::uuid
+        AND company_id = ${currentUser.company_id}::uuid
+      LIMIT 1;
+    `) as unknown as EventRow[];
 
-    const events = (rows as unknown as EventRow[]).map(mapEvent);
+    const row = rows[0];
+
+    if (!row) {
+      return NextResponse.json(
+        {
+          success: false,
+          event: null,
+          data: null,
+          error: "Event not found",
+        },
+        { status: 404 },
+      );
+    }
+
+    const event = mapEvent(row);
 
     return NextResponse.json({
       success: true,
-      events,
-      data: events,
+      event,
+      data: event,
     });
   } catch (error: unknown) {
-    console.error("GET /api/events error:", error);
+    console.error("GET /api/events/[eventId] error:", error);
 
     return NextResponse.json(
       {
         success: false,
-        events: [],
-        data: [],
+        event: null,
+        data: null,
         error: getErrorMessage(error),
       },
       { status: 500 },
@@ -217,12 +271,40 @@ export async function GET(): Promise<NextResponse> {
   }
 }
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export async function PATCH(
+  request: NextRequest,
+  context: RouteContext,
+): Promise<NextResponse> {
   try {
-    await ensureEventCoreColumns();
+    await ensureEventDetailColumns();
 
-    const currentUser = await getCurrentUser();
-    const body = (await request.json()) as CreateEventBody;
+    const currentUser = (await getCurrentUser()) as CurrentUser | null;
+    const { eventId } = await context.params;
+    const body = (await request.json()) as UpdateEventBody;
+
+    if (!currentUser?.company_id) {
+      return NextResponse.json(
+        {
+          success: false,
+          event: null,
+          data: null,
+          error: "Unauthorized",
+        },
+        { status: 401 },
+      );
+    }
+
+    if (!eventId) {
+      return NextResponse.json(
+        {
+          success: false,
+          event: null,
+          data: null,
+          error: "Missing event id",
+        },
+        { status: 400 },
+      );
+    }
 
     const eventName =
       getString(body.name) ??
@@ -235,62 +317,54 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       getString(body.event_date);
 
     const guestCount =
-      getNumber(body.guestCount) ?? getNumber(body.guest_count) ?? 0;
+      getNumber(body.guestCount) ?? getNumber(body.guest_count);
+
+    const status = getString(body.status);
 
     const serviceType =
-      getString(body.serviceType) ?? getString(body.service_type) ?? "Catering";
+      getString(body.serviceType) ?? getString(body.service_type);
 
-    if (!eventName) {
+    const revenue = getNumber(body.revenue);
+    const foodCost = getNumber(body.foodCost) ?? getNumber(body.food_cost);
+    const totalCost = getNumber(body.totalCost) ?? getNumber(body.total_cost);
+    const margin = getNumber(body.margin);
+
+    const existingRows = (await sql`
+      SELECT id
+      FROM events
+      WHERE id = ${eventId}::uuid
+        AND company_id = ${currentUser.company_id}::uuid
+      LIMIT 1;
+    `) as unknown as { id: string }[];
+
+    if (existingRows.length === 0) {
       return NextResponse.json(
         {
           success: false,
-          error: "Event name is required",
+          event: null,
+          data: null,
+          error: "Event not found",
         },
-        { status: 400 },
+        { status: 404 },
       );
     }
 
-    if (!eventDate) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Event date is required",
-        },
-        { status: 400 },
-      );
-    }
-
-    const rows = await sql`
-      INSERT INTO events (
-        company_id,
-        name,
-        event_name,
-        event_date,
-        guest_count,
-        status,
-        service_type,
-        total_cost,
-        revenue,
-        food_cost,
-        margin,
-        created_at,
-        updated_at
-      )
-      VALUES (
-        ${currentUser.company_id},
-        ${eventName},
-        ${eventName},
-        ${eventDate},
-        ${guestCount},
-        'DRAFT',
-        ${serviceType},
-        0,
-        0,
-        0,
-        0,
-        NOW(),
-        NOW()
-      )
+    const rows = (await sql`
+      UPDATE events
+      SET
+        name = COALESCE(${eventName}, name),
+        event_name = COALESCE(${eventName}, event_name),
+        event_date = COALESCE(${eventDate}, event_date::text)::date,
+        guest_count = COALESCE(${guestCount}, guest_count),
+        status = COALESCE(${status}, status),
+        service_type = COALESCE(${serviceType}, service_type),
+        revenue = COALESCE(${revenue}, revenue),
+        food_cost = COALESCE(${foodCost}, food_cost),
+        total_cost = COALESCE(${totalCost}, total_cost),
+        margin = COALESCE(${margin}, margin),
+        updated_at = NOW()
+      WHERE id = ${eventId}::uuid
+        AND company_id = ${currentUser.company_id}::uuid
       RETURNING
         id,
         company_id,
@@ -307,9 +381,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         margin,
         created_at::text AS created_at,
         updated_at::text AS updated_at;
-    `;
+    `) as unknown as EventRow[];
 
-    const event = mapEvent(rows[0] as EventRow);
+    const event = mapEvent(rows[0]);
 
     return NextResponse.json({
       success: true,
@@ -317,11 +391,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       data: event,
     });
   } catch (error: unknown) {
-    console.error("POST /api/events error:", error);
+    console.error("PATCH /api/events/[eventId] error:", error);
 
     return NextResponse.json(
       {
         success: false,
+        event: null,
+        data: null,
         error: getErrorMessage(error),
       },
       { status: 500 },
