@@ -14,12 +14,6 @@ const sql = postgres(databaseUrl, {
   ssl: databaseUrl.includes("localhost") ? false : "require",
 });
 
-type RouteContext = {
-  params: Promise<{
-    eventId: string;
-  }>;
-};
-
 type CurrentUser = {
   id: string;
   email: string;
@@ -63,7 +57,7 @@ type EventResponse = {
   updatedAt: string | null;
 };
 
-type UpdateEventBody = {
+type CreateEventBody = {
   name?: unknown;
   eventName?: unknown;
   event_name?: unknown;
@@ -154,10 +148,10 @@ function getErrorMessage(error: unknown): string {
     return JSON.stringify(error);
   }
 
-  return "Unknown event detail error";
+  return "Unknown events route error";
 }
 
-async function ensureEventDetailColumns(): Promise<void> {
+async function ensureEventCoreColumns(): Promise<void> {
   await sql`
     ALTER TABLE events
     ADD COLUMN IF NOT EXISTS name TEXT,
@@ -176,39 +170,21 @@ async function ensureEventDetailColumns(): Promise<void> {
   `;
 }
 
-export async function GET(
-  request: NextRequest,
-  context: RouteContext,
-): Promise<NextResponse> {
-  void request;
-
+export async function GET(): Promise<NextResponse> {
   try {
-    await ensureEventDetailColumns();
+    await ensureEventCoreColumns();
 
     const currentUser = (await getCurrentUser()) as CurrentUser | null;
-    const { eventId } = await context.params;
 
     if (!currentUser?.company_id) {
       return NextResponse.json(
         {
           success: false,
-          event: null,
-          data: null,
+          events: [],
+          data: [],
           error: "Unauthorized",
         },
         { status: 401 },
-      );
-    }
-
-    if (!eventId) {
-      return NextResponse.json(
-        {
-          success: false,
-          event: null,
-          data: null,
-          error: "Missing event id",
-        },
-        { status: 400 },
       );
     }
 
@@ -230,40 +206,25 @@ export async function GET(
         created_at::text AS created_at,
         updated_at::text AS updated_at
       FROM events
-      WHERE id = ${eventId}::uuid
-        AND company_id = ${currentUser.company_id}::uuid
-      LIMIT 1;
+      WHERE company_id::text = ${currentUser.company_id}
+      ORDER BY event_date DESC NULLS LAST, created_at DESC NULLS LAST;
     `) as unknown as EventRow[];
 
-    const row = rows[0];
-
-    if (!row) {
-      return NextResponse.json(
-        {
-          success: false,
-          event: null,
-          data: null,
-          error: "Event not found",
-        },
-        { status: 404 },
-      );
-    }
-
-    const event = mapEvent(row);
+    const events = rows.map(mapEvent);
 
     return NextResponse.json({
       success: true,
-      event,
-      data: event,
+      events,
+      data: events,
     });
   } catch (error: unknown) {
-    console.error("GET /api/events/[eventId] error:", error);
+    console.error("GET /api/events error:", error);
 
     return NextResponse.json(
       {
         success: false,
-        event: null,
-        data: null,
+        events: [],
+        data: [],
         error: getErrorMessage(error),
       },
       { status: 500 },
@@ -271,16 +232,12 @@ export async function GET(
   }
 }
 
-export async function PATCH(
-  request: NextRequest,
-  context: RouteContext,
-): Promise<NextResponse> {
+export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
-    await ensureEventDetailColumns();
+    await ensureEventCoreColumns();
 
     const currentUser = (await getCurrentUser()) as CurrentUser | null;
-    const { eventId } = await context.params;
-    const body = (await request.json()) as UpdateEventBody;
+    const body = (await request.json()) as CreateEventBody;
 
     if (!currentUser?.company_id) {
       return NextResponse.json(
@@ -294,22 +251,11 @@ export async function PATCH(
       );
     }
 
-    if (!eventId) {
-      return NextResponse.json(
-        {
-          success: false,
-          event: null,
-          data: null,
-          error: "Missing event id",
-        },
-        { status: 400 },
-      );
-    }
-
     const eventName =
       getString(body.name) ??
       getString(body.eventName) ??
-      getString(body.event_name);
+      getString(body.event_name) ??
+      "Untitled Event";
 
     const eventDate =
       getString(body.date) ??
@@ -317,54 +263,50 @@ export async function PATCH(
       getString(body.event_date);
 
     const guestCount =
-      getNumber(body.guestCount) ?? getNumber(body.guest_count);
+      getNumber(body.guestCount) ?? getNumber(body.guest_count) ?? 0;
 
-    const status = getString(body.status);
+    const status = getString(body.status) ?? "draft";
 
     const serviceType =
-      getString(body.serviceType) ?? getString(body.service_type);
+      getString(body.serviceType) ?? getString(body.service_type) ?? "catering";
 
-    const revenue = getNumber(body.revenue);
-    const foodCost = getNumber(body.foodCost) ?? getNumber(body.food_cost);
-    const totalCost = getNumber(body.totalCost) ?? getNumber(body.total_cost);
-    const margin = getNumber(body.margin);
-
-    const existingRows = (await sql`
-      SELECT id
-      FROM events
-      WHERE id = ${eventId}::uuid
-        AND company_id = ${currentUser.company_id}::uuid
-      LIMIT 1;
-    `) as unknown as { id: string }[];
-
-    if (existingRows.length === 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          event: null,
-          data: null,
-          error: "Event not found",
-        },
-        { status: 404 },
-      );
-    }
+    const revenue = getNumber(body.revenue) ?? 0;
+    const foodCost = getNumber(body.foodCost) ?? getNumber(body.food_cost) ?? 0;
+    const totalCost =
+      getNumber(body.totalCost) ?? getNumber(body.total_cost) ?? foodCost;
+    const margin = getNumber(body.margin) ?? 0;
 
     const rows = (await sql`
-      UPDATE events
-      SET
-        name = COALESCE(${eventName}, name),
-        event_name = COALESCE(${eventName}, event_name),
-        event_date = COALESCE(${eventDate}, event_date::text)::date,
-        guest_count = COALESCE(${guestCount}, guest_count),
-        status = COALESCE(${status}, status),
-        service_type = COALESCE(${serviceType}, service_type),
-        revenue = COALESCE(${revenue}, revenue),
-        food_cost = COALESCE(${foodCost}, food_cost),
-        total_cost = COALESCE(${totalCost}, total_cost),
-        margin = COALESCE(${margin}, margin),
-        updated_at = NOW()
-      WHERE id = ${eventId}::uuid
-        AND company_id = ${currentUser.company_id}::uuid
+      INSERT INTO events (
+        company_id,
+        name,
+        event_name,
+        event_date,
+        guest_count,
+        status,
+        service_type,
+        revenue,
+        food_cost,
+        total_cost,
+        margin,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        ${currentUser.company_id}::uuid,
+        ${eventName},
+        ${eventName},
+        ${eventDate}::date,
+        ${guestCount},
+        ${status},
+        ${serviceType},
+        ${revenue},
+        ${foodCost},
+        ${totalCost},
+        ${margin},
+        NOW(),
+        NOW()
+      )
       RETURNING
         id,
         company_id,
@@ -391,7 +333,7 @@ export async function PATCH(
       data: event,
     });
   } catch (error: unknown) {
-    console.error("PATCH /api/events/[eventId] error:", error);
+    console.error("POST /api/events error:", error);
 
     return NextResponse.json(
       {
