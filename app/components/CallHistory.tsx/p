@@ -1,0 +1,100 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+
+interface CallRecord {
+  id: string;
+  phoneNumber: string;
+  duration: number;
+  transcript: string;
+  callType: string;
+  orderData?: any;
+  recordingUrl?: string;
+  createdAt: string;
+}
+
+export default function CallHistory({ companyId }: { companyId: string }) {
+  const [calls, setCalls] = useState<CallRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchCalls();
+  }, []);
+
+  const fetchCalls = async () => {
+    const res = await fetch(`/api/calls/history?companyId=${companyId}`);
+    const data = await res.json();
+    setCalls(data.calls);
+    setLoading(false);
+  };
+
+  const playRecording = (url: string) => {
+    const audio = new Audio(url);
+    audio.play();
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6">
+      <h2 className="text-2xl font-bold mb-4">📞 Call History</h2>
+
+      {loading && <p>Loading calls...</p>}
+
+      {calls.length === 0 && !loading && (
+        <p className="text-gray-500">No calls yet</p>
+      )}
+
+      <div className="space-y-4">
+        {calls.map((call) => (
+          <div key={call.id} className="border rounded-lg p-4">
+            <div className="flex justify-between items-start mb-2">
+              <div>
+                <p className="font-semibold">{call.phoneNumber}</p>
+                <p className="text-sm text-gray-600">
+                  {new Date(call.createdAt).toLocaleString()}
+                </p>
+              </div>
+              <div className="text-right">
+                <span className={`px-3 py-1 rounded text-sm ${
+                  call.callType === 'order' ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'
+                }`}>
+                  {call.callType}
+                </span>
+                <p className="text-sm text-gray-600 mt-1">
+                  {Math.floor(call.duration / 60)}:{(call.duration % 60).toString().padStart(2, '0')}
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-gray-50 p-3 rounded mb-2">
+              <p className="text-sm font-medium mb-1">Transcript:</p>
+              <p className="text-sm text-gray-700">{call.transcript}</p>
+            </div>
+
+            {call.orderData && (
+              <div className="bg-blue-50 p-3 rounded mb-2">
+                <p className="text-sm font-medium mb-1">Order Details:</p>
+                <ul className="text-sm">
+                  {call.orderData.items.map((item: any, i: number) => (
+                    <li key={i}>
+                      {item.quantity}x {item.name}
+                      {item.mods.length > 0 && ` (${item.mods.join(', ')})`}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {call.recordingUrl && (
+              <button
+                onClick={() => playRecording(call.recordingUrl!)}
+                className="text-sm bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded"
+              >
+                🎧 Play Recording
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

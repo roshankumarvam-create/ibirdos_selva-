@@ -1,820 +1,461 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-type PayableInvoice = {
+type InvoiceRow = {
   id: string;
-  vendor: string;
-  invoice: string;
-  date: string;
-  due: string;
-  items: number;
-  amount: number;
-  posted: "Posted" | "Pending";
-  status: "Approved" | "Paid" | "Pending" | "Overdue";
-  ai: "AI Extracted" | "Pending";
-  note?: string;
+  vendorName: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  totalAmount: number;
+  status: string;
+  paymentStatus: string;
+  paidAt: string;
+  paymentMethod: string;
+  paymentReference: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
-type ReceivableInvoice = {
-  id: string;
-  customer: string;
-  invoice: string;
-  event: string;
-  amount: number;
-  method: "Card on File" | "ACH" | "Check";
-  status: "Ready to Charge" | "Pending Collection" | "Awaiting Payment";
-  due: string;
+type InvoiceStats = {
+  totalInvoices: number;
+  totalSpend: number;
+  needsReview: number;
+  confirmed: number;
 };
 
-const payableSeed: PayableInvoice[] = [
+type InvoiceListResponse = {
+  success: boolean;
+  invoices: InvoiceRow[];
+  stats: InvoiceStats;
+  error?: string;
+};
+
+type VendorConnection = {
+  name: string;
+  description: string;
+};
+
+const vendorConnections: VendorConnection[] = [
   {
-    id: "p1",
-    vendor: "Sysco Food Service",
-    invoice: "755148608",
-    date: "Apr 16",
-    due: "May 1",
-    items: 24,
-    amount: 3218,
-    posted: "Posted",
-    status: "Approved",
-    ai: "AI Extracted",
-    note: "FDA Alert",
+    name: "Sysco",
+    description: "Request future invoice feed, email import, API, or EDI setup.",
   },
   {
-    id: "p2",
-    vendor: "Sysco Food Service",
-    invoice: "755148607",
-    date: "Apr 9",
-    due: "Apr 24",
-    items: 18,
-    amount: 2904,
-    posted: "Pending",
-    status: "Paid",
-    ai: "AI Extracted",
+    name: "US Foods",
+    description: "Request vendor invoice connection for purchasing data.",
   },
   {
-    id: "p3",
-    vendor: "US Foods",
-    invoice: "USF-44192",
-    date: "Apr 8",
-    due: "Apr 22",
-    items: 11,
-    amount: 1445,
-    posted: "Pending",
-    status: "Pending",
-    ai: "Pending",
+    name: "Vesta",
+    description: "Request future vendor invoice and catalog connection.",
   },
   {
-    id: "p4",
-    vendor: "Cash & Carry",
-    invoice: "CC-7721",
-    date: "Apr 5",
-    due: "Apr 19",
-    items: 9,
-    amount: 612,
-    posted: "Posted",
-    status: "Overdue",
-    ai: "AI Extracted",
+    name: "Allen Brothers",
+    description: "Request premium protein invoice import support.",
+  },
+  {
+    name: "Restaurant Depot",
+    description: "Request invoice import workflow for warehouse purchases.",
+  },
+  {
+    name: "Gordon Food Service",
+    description: "Request supplier invoice connection for foodservice purchasing.",
   },
 ];
 
-const receivableSeed: ReceivableInvoice[] = [
-  {
-    id: "r1",
-    customer: "Microsoft Catering",
-    invoice: "AR-2208",
-    event: "Corporate Lunch",
-    amount: 8400,
-    method: "Card on File",
-    status: "Ready to Charge",
-    due: "Apr 22",
-  },
-  {
-    id: "r2",
-    customer: "Amazon Team Event",
-    invoice: "AR-2209",
-    event: "Buffet Dinner",
-    amount: 6800,
-    method: "ACH",
-    status: "Pending Collection",
-    due: "Apr 23",
-  },
-  {
-    id: "r3",
-    customer: "Private Dining Client",
-    invoice: "AR-2210",
-    event: "Tasting",
-    amount: 1950,
-    method: "Check",
-    status: "Awaiting Payment",
-    due: "Apr 24",
-  },
-];
-
-function fmtMoney(n: number) {
+function formatMoney(value: number): string {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
-    maximumFractionDigits: 0,
-  }).format(n);
+  }).format(Number.isFinite(value) ? value : 0);
 }
 
-function statusStyle(status: string) {
+function formatDate(value: string): string {
+  if (!value) {
+    return "No date";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "No date";
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
+}
+
+function getStatusLabel(status: string): string {
+  if (!status) {
+    return "Review";
+  }
+
+  return status
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function getStatusClass(status: string): string {
+  const cleanStatus = status?.toLowerCase() ?? "review";
+
+  if (cleanStatus === "confirmed" || cleanStatus === "posted" || cleanStatus === "paid") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  }
+
   if (
-    status === "Approved" ||
-    status === "Paid" ||
-    status === "Ready to Charge"
+    cleanStatus === "needs_review" ||
+    cleanStatus === "review" ||
+    cleanStatus === "unpaid"
   ) {
-    return { color: "#166534", background: "#DCFCE7" };
+    return "border-amber-200 bg-amber-50 text-amber-700";
   }
-  if (status === "Pending" || status === "Pending Collection") {
-    return { color: "#92400E", background: "#FEF3C7" };
-  }
-  if (status === "Overdue" || status === "Awaiting Payment") {
-    return { color: "#991B1B", background: "#FEE2E2" };
-  }
-  return { color: "#475569", background: "#F1F5F9" };
+
+  return "border-slate-200 bg-slate-50 text-slate-700";
 }
 
 export default function InvoicesPage() {
-  const [payables] = useState<PayableInvoice[]>(payableSeed);
-  const [receivables] = useState<ReceivableInvoice[]>(receivableSeed);
+  const router = useRouter();
 
-  const totalPayable = useMemo(
-    () =>
-      payables
-        .filter((x) => x.status !== "Paid")
-        .reduce((sum, x) => sum + x.amount, 0),
-    [payables]
-  );
+  const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [errorMessage, setErrorMessage] = useState<string>("");
 
-  const totalReceivable = useMemo(
-    () => receivables.reduce((sum, x) => sum + x.amount, 0),
-    [receivables]
-  );
+  const loadInvoices = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      setErrorMessage("");
 
-  const overdue = useMemo(
-    () => payables.filter((x) => x.status === "Overdue").length,
-    [payables]
-  );
+      const response = await fetch("/api/invoices", {
+        method: "GET",
+        cache: "no-store",
+      });
 
-  const monthClose = [
-    { label: "Month Sales", value: "$84,220", color: "#2563EB" },
-    { label: "Accounts Payable", value: "$12,940", color: "#DC2626" },
-    { label: "Inventory Value", value: "$18,600", color: "#7C3AED" },
-    { label: "LC", value: "$21,480", color: "#F59E0B" },
-    { label: "PC", value: "$23,960", color: "#10B981" },
-    { label: "Gross Profit", value: "$38,780", color: "#16A34A" },
-    { label: "Operating Cost", value: "$9,640", color: "#D97706" },
-    { label: "Last Profit Margin", value: "24.3%", color: "#4338CA" },
-  ];
+      const data = (await response.json()) as InvoiceListResponse;
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || "Unable to load invoices.");
+      }
+
+      setInvoices(data.invoices ?? []);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : "Unable to load invoices.";
+      setErrorMessage(message);
+      setInvoices([]);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadInvoices();
+  }, [loadInvoices]);
+
+  const stats = useMemo(() => {
+    const totalInvoices = invoices.length;
+
+    const totalSpend = invoices.reduce((sum, invoice) => {
+      return sum + Number(invoice.totalAmount ?? 0);
+    }, 0);
+
+    const reviewCount = invoices.filter((invoice) => {
+      const status = invoice.status?.toLowerCase() ?? "review";
+      return status === "review" || status === "needs_review";
+    }).length;
+
+    const confirmedCount = invoices.filter((invoice) => {
+      const status = invoice.status?.toLowerCase() ?? "";
+      return status === "confirmed" || status === "posted";
+    }).length;
+
+    return {
+      totalInvoices,
+      totalSpend,
+      reviewCount,
+      confirmedCount,
+    };
+  }, [invoices]);
 
   return (
-    <div
-      style={{
-        fontFamily: "Inter, sans-serif",
-        background: "#FFFFFF",
-        minHeight: "100vh",
-        color: "#0F172A",
-      }}
-    >
-      <div
-        style={{
-          background: "linear-gradient(135deg, #1E293B 0%, #233A67 100%)",
-          borderRadius: "24px",
-          padding: "28px 32px",
-          marginBottom: "24px",
-          boxShadow: "0 10px 30px rgba(15, 23, 42, 0.12)",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "flex-start",
-            gap: "20px",
-            flexWrap: "wrap",
-          }}
-        >
-          <div>
-            <h1
-              style={{
-                fontSize: "38px",
-                fontWeight: 800,
-                margin: 0,
-                color: "#FFFFFF",
-              }}
-            >
-              Invoice Processing
-            </h1>
-            <div
-              style={{
-                marginTop: "10px",
-                color: "#BFDBFE",
-                fontSize: "16px",
-                lineHeight: 1.6,
-              }}
-            >
-              AP Payables · AR Receivables · eVia · ACH · Credit / Debit
+    <main className="min-h-screen bg-[#f5f0e4] px-4 py-6 text-slate-950 sm:px-6 lg:px-8">
+      <section className="mx-auto flex w-full max-w-6xl flex-col gap-5">
+        <div className="rounded-[28px] border border-[#d7c49e] bg-white p-6 shadow-sm sm:p-8">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.45em] text-[#9a5f13]">
+                Invoice Command Center
+              </p>
+              <h1 className="mt-4 text-4xl font-black tracking-tight text-[#001f1a] sm:text-5xl">
+                Supplier Invoices
+              </h1>
+              <p className="mt-4 max-w-3xl text-sm leading-6 text-slate-700">
+                Upload invoices now. Connect vendors later. iBirdOS turns supplier
+                invoice changes into ingredient cost updates, price history, alerts,
+                and recipe cost recalculation.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap gap-3">
+              <Link
+                href="/invoices/upload"
+                className="rounded-full bg-[#004c3f] px-5 py-3 text-sm font-black text-white hover:bg-[#00382f]"
+              >
+                Upload Invoice
+              </Link>
+
+              <button
+                type="button"
+                onClick={() => {
+                  void fetch("/api/invoices", {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                      vendorName: "Manual Vendor",
+                      invoiceNumber: `MANUAL-${Date.now()}`,
+                      invoiceDate: new Date().toISOString(),
+                      totalAmount: 0,
+                      status: "needs_review",
+                    }),
+                  })
+                    .then((response) => response.json() as Promise<{ invoice?: InvoiceRow }>)
+                    .then((data) => {
+                      if (data.invoice?.id) {
+                        router.push(`/invoices/${data.invoice.id}`);
+                      } else {
+                        void loadInvoices();
+                      }
+                    });
+                }}
+                className="rounded-full border border-[#004c3f] bg-white px-5 py-3 text-sm font-black text-[#004c3f] hover:bg-[#f8faf7]"
+              >
+                Manual Invoice
+              </button>
+
+              <Link
+                href="/dashboard"
+                className="rounded-full border border-[#d7c49e] bg-white px-5 py-3 text-sm font-black text-[#004c3f] hover:bg-[#f8faf7]"
+              >
+                Dashboard
+              </Link>
             </div>
           </div>
+        </div>
 
-          <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
-            <a
-              href="/reports"
-              style={{
-                textDecoration: "none",
-                background: "rgba(255,255,255,0.08)",
-                color: "#FFFFFF",
-                border: "1px solid rgba(255,255,255,0.16)",
-                padding: "12px 18px",
-                borderRadius: "12px",
-                fontSize: "14px",
-                fontWeight: 700,
-              }}
-            >
-              Month-End Reports
-            </a>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+          <div className="rounded-[22px] border border-[#d7c49e] bg-white p-5 shadow-sm">
+            <p className="text-xs font-bold uppercase tracking-[0.3em] text-slate-500">
+              Total Invoices
+            </p>
+            <p className="mt-3 text-3xl font-black text-[#001f1a]">
+              {stats.totalInvoices}
+            </p>
+          </div>
 
-            <button
-              style={{
-                background: "#6366F1",
-                color: "#FFFFFF",
-                padding: "12px 18px",
-                borderRadius: "12px",
-                fontSize: "14px",
-                fontWeight: 700,
-                border: "none",
-                cursor: "pointer",
-              }}
-            >
-              + Upload Invoice PDF
-            </button>
+          <div className="rounded-[22px] border border-[#d7c49e] bg-white p-5 shadow-sm">
+            <p className="text-xs font-bold uppercase tracking-[0.3em] text-slate-500">
+              Total Spend
+            </p>
+            <p className="mt-3 text-3xl font-black text-[#001f1a]">
+              {formatMoney(stats.totalSpend)}
+            </p>
+          </div>
+
+          <div className="rounded-[22px] border border-[#d7c49e] bg-white p-5 shadow-sm">
+            <p className="text-xs font-bold uppercase tracking-[0.3em] text-slate-500">
+              Needs Review
+            </p>
+            <p className="mt-3 text-3xl font-black text-[#001f1a]">
+              {stats.reviewCount}
+            </p>
+          </div>
+
+          <div className="rounded-[22px] border border-[#d7c49e] bg-white p-5 shadow-sm">
+            <p className="text-xs font-bold uppercase tracking-[0.3em] text-slate-500">
+              Confirmed
+            </p>
+            <p className="mt-3 text-3xl font-black text-[#001f1a]">
+              {stats.confirmedCount}
+            </p>
           </div>
         </div>
 
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(4, 1fr)",
-            gap: "12px",
-            marginTop: "22px",
-          }}
-        >
-          {[
-            {
-              label: "Total Payable",
-              value: fmtMoney(totalPayable),
-              sub: "owed to vendors",
-              color: "#FCA5A5",
-            },
-            {
-              label: "Total Receivable",
-              value: fmtMoney(totalReceivable),
-              sub: "owed by customers",
-              color: "#86EFAC",
-            },
-            {
-              label: "Overdue",
-              value: String(overdue),
-              sub: "needs immediate action",
-              color: "#FCA5A5",
-            },
-            {
-              label: "AI Extraction Rate",
-              value: "98.2%",
-              sub: "avg 2.1s per invoice",
-              color: "#93C5FD",
-            },
-          ].map((card) => (
-            <div
-              key={card.label}
-              style={{
-                background: "rgba(255,255,255,0.08)",
-                border: "1px solid rgba(255,255,255,0.08)",
-                borderRadius: "16px",
-                padding: "18px 16px",
-              }}
-            >
-              <div
-                style={{
-                  fontSize: "12px",
-                  color: "#B8C4E0",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.06em",
-                  marginBottom: "8px",
-                  fontWeight: 700,
-                }}
-              >
-                {card.label}
-              </div>
-              <div
-                style={{
-                  fontSize: "24px",
-                  fontWeight: 800,
-                  color: card.color,
-                  marginBottom: "6px",
-                }}
-              >
-                {card.value}
-              </div>
-              <div style={{ fontSize: "13px", color: "#94A3B8" }}>{card.sub}</div>
+        {errorMessage ? (
+          <div className="rounded-[20px] border border-red-200 bg-red-50 p-5 text-sm font-bold text-red-700">
+            {errorMessage}
+          </div>
+        ) : null}
+
+        <div className="rounded-[28px] border border-[#d7c49e] bg-white p-6 shadow-sm sm:p-8">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.45em] text-[#9a5f13]">
+                Invoice List
+              </p>
+              <h2 className="mt-3 text-2xl font-black text-[#001f1a]">
+                Recent Supplier Invoices
+              </h2>
             </div>
-          ))}
-        </div>
-      </div>
 
-      <div
-        style={{
-          background: "#FFFFFF",
-          border: "1px solid #E2E8F0",
-          borderRadius: "20px",
-          overflow: "hidden",
-          marginBottom: "18px",
-          boxShadow: "0 10px 30px rgba(15, 23, 42, 0.06)",
-        }}
-      >
-        <div
-          style={{
-            padding: "18px 22px",
-            borderBottom: "1px solid #E2E8F0",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <div style={{ fontSize: "24px", fontWeight: 800 }}>
-            Vendor Invoices — Accounts Payable
+            <Link
+              href="/invoices/upload"
+              className="rounded-full bg-[#004c3f] px-5 py-3 text-sm font-black text-white hover:bg-[#00382f]"
+            >
+              Upload New Invoice
+            </Link>
           </div>
-          <div style={{ fontSize: "14px", color: "#64748B" }}>
-            Total outstanding:{" "}
-            <strong style={{ color: "#334155" }}>{fmtMoney(totalPayable)}</strong>
-          </div>
-        </div>
 
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ background: "#F8FAFC" }}>
-                {[
-                  "Vendor",
-                  "Invoice #",
-                  "Date",
-                  "Due Date",
-                  "Items",
-                  "Amount",
-                  "GL Posted",
-                  "Status",
-                  "AI",
-                  "Action",
-                ].map((h) => (
-                  <th
-                    key={h}
-                    style={{
-                      padding: "14px 16px",
-                      textAlign: "left",
-                      fontSize: "11px",
-                      fontWeight: 800,
-                      color: "#94A3B8",
-                      textTransform: "uppercase",
-                      letterSpacing: "0.08em",
-                      borderBottom: "1px solid #E2E8F0",
-                    }}
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {payables.map((row) => {
-                const badge = statusStyle(row.status);
-                return (
-                  <tr
-                    key={row.id}
-                    style={{
-                      borderBottom: "1px solid #F1F5F9",
-                      background: row.status === "Overdue" ? "#FFF7ED" : "#FFFFFF",
-                    }}
-                  >
-                    <td style={{ padding: "16px" }}>
-                      <div style={{ fontWeight: 700 }}>{row.vendor}</div>
-                      {row.note ? (
-                        <div style={{ fontSize: "12px", color: "#DC2626", marginTop: "4px" }}>
-                          ⚠ {row.note}
-                        </div>
-                      ) : null}
-                    </td>
-                    <td style={{ padding: "16px", color: "#4F46E5", fontWeight: 700 }}>
-                      {row.invoice}
-                    </td>
-                    <td style={{ padding: "16px", color: "#475569" }}>{row.date}</td>
+          <div className="mt-6 overflow-x-auto">
+            <table className="w-full min-w-[980px] border-separate border-spacing-y-3">
+              <thead>
+                <tr className="text-left text-xs font-black uppercase tracking-[0.25em] text-slate-500">
+                  <th className="px-4 py-2">Vendor</th>
+                  <th className="px-4 py-2">Invoice #</th>
+                  <th className="px-4 py-2">Invoice Date</th>
+                  <th className="px-4 py-2">Total</th>
+                  <th className="px-4 py-2">Status</th>
+                  <th className="px-4 py-2">Payment</th>
+                  <th className="px-4 py-2">Created</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {isLoading ? (
+                  <tr>
                     <td
-                      style={{
-                        padding: "16px",
-                        color: row.status === "Overdue" ? "#DC2626" : "#475569",
-                        fontWeight: row.status === "Overdue" ? 700 : 500,
-                      }}
+                      colSpan={7}
+                      className="rounded-2xl border border-slate-200 bg-[#fffdfa] px-5 py-8 text-center text-sm font-bold text-slate-600"
                     >
-                      {row.due}
-                    </td>
-                    <td style={{ padding: "16px", color: "#475569" }}>{row.items}</td>
-                    <td style={{ padding: "16px", fontWeight: 800, fontSize: "16px" }}>
-                      {fmtMoney(row.amount)}
-                    </td>
-                    <td
-                      style={{
-                        padding: "16px",
-                        color: row.posted === "Posted" ? "#166534" : "#94A3B8",
-                        fontWeight: 700,
-                      }}
-                    >
-                      {row.posted}
-                    </td>
-                    <td style={{ padding: "16px" }}>
-                      <span
-                        style={{
-                          fontSize: "12px",
-                          fontWeight: 700,
-                          color: badge.color,
-                          background: badge.background,
-                          padding: "6px 10px",
-                          borderRadius: "999px",
-                        }}
-                      >
-                        {row.status}
-                      </span>
-                    </td>
-                    <td
-                      style={{
-                        padding: "16px",
-                        color: row.ai === "Pending" ? "#92400E" : "#166534",
-                        fontWeight: 700,
-                      }}
-                    >
-                      {row.ai}
-                    </td>
-                    <td style={{ padding: "16px" }}>
-                      <div style={{ display: "flex", gap: "8px" }}>
-                        <a
-                          href="/reports"
-                          style={{
-                            textDecoration: "none",
-                            background: "#FFFFFF",
-                            border: "1px solid #E2E8F0",
-                            color: "#334155",
-                            borderRadius: "8px",
-                            padding: "6px 10px",
-                            fontSize: "13px",
-                            fontWeight: 600,
-                          }}
-                        >
-                          View
-                        </a>
-                        <button
-                          style={{
-                            background: row.status === "Paid" ? "#F1F5F9" : "#6366F1",
-                            color: row.status === "Paid" ? "#64748B" : "#FFFFFF",
-                            borderRadius: "8px",
-                            padding: "6px 10px",
-                            fontSize: "13px",
-                            fontWeight: 700,
-                            border: "none",
-                            cursor: row.status === "Paid" ? "default" : "pointer",
-                          }}
-                        >
-                          {row.status === "Paid" ? "Done" : "Pay"}
-                        </button>
-                      </div>
+                      Loading invoices...
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
+                ) : null}
 
-      <div
-        style={{
-          background: "#FFFFFF",
-          border: "1px solid #E2E8F0",
-          borderRadius: "20px",
-          overflow: "hidden",
-          marginBottom: "18px",
-          boxShadow: "0 10px 30px rgba(15, 23, 42, 0.06)",
-        }}
-      >
-        <div
-          style={{
-            padding: "18px 22px",
-            borderBottom: "1px solid #E2E8F0",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <div style={{ fontSize: "24px", fontWeight: 800 }}>
-            Customer Invoices — Accounts Receivable
-          </div>
-          <div style={{ fontSize: "14px", color: "#64748B" }}>
-            Total receivable:{" "}
-            <strong style={{ color: "#334155" }}>{fmtMoney(totalReceivable)}</strong>
+                {!isLoading && invoices.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={7}
+                      className="rounded-2xl border border-slate-200 bg-[#fffdfa] px-5 py-8 text-center text-sm font-bold text-slate-600"
+                    >
+                      No invoices yet. Upload your first supplier invoice to update
+                      ingredient costs, create price history, and trigger cost alerts.
+                    </td>
+                  </tr>
+                ) : null}
+
+                {!isLoading
+                  ? invoices.map((invoice) => {
+                      return (
+                        <tr
+                          key={invoice.id}
+                          onClick={() => router.push(`/invoices/${invoice.id}`)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              router.push(`/invoices/${invoice.id}`);
+                            }
+                          }}
+                          tabIndex={0}
+                          className="cursor-pointer rounded-3xl bg-[#fffdf8] text-sm font-bold transition hover:bg-[#fff7df] focus:outline-none focus:ring-2 focus:ring-[#004c3f]"
+                        >
+                          <td className="rounded-l-2xl border-y border-l border-[#e2e8f0] px-4 py-4 text-[#001f1a]">
+                            {invoice.vendorName || "Unknown Vendor"}
+                          </td>
+
+                          <td className="border-y border-[#e2e8f0] px-4 py-4">
+                            {invoice.invoiceNumber || "-"}
+                          </td>
+
+                          <td className="border-y border-[#e2e8f0] px-4 py-4">
+                            {formatDate(invoice.invoiceDate)}
+                          </td>
+
+                          <td className="border-y border-[#e2e8f0] px-4 py-4">
+                            {formatMoney(invoice.totalAmount)}
+                          </td>
+
+                          <td className="border-y border-[#e2e8f0] px-4 py-4">
+                            <span
+                              className={`inline-flex rounded-full border px-3 py-2 text-xs font-black ${getStatusClass(
+                                invoice.status,
+                              )}`}
+                            >
+                              {getStatusLabel(invoice.status)}
+                            </span>
+                          </td>
+
+                          <td className="border-y border-[#e2e8f0] px-4 py-4">
+                            <span
+                              className={`inline-flex rounded-full border px-3 py-2 text-xs font-black ${getStatusClass(
+                                invoice.paymentStatus ?? "unpaid",
+                              )}`}
+                            >
+                              {getStatusLabel(invoice.paymentStatus ?? "unpaid")}
+                            </span>
+                          </td>
+
+                          <td className="rounded-r-2xl border-y border-r border-[#e2e8f0] px-4 py-4">
+                            {formatDate(invoice.createdAt)}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  : null}
+              </tbody>
+            </table>
           </div>
         </div>
 
-        <div style={{ display: "grid", gap: "12px", padding: "18px 22px" }}>
-          {receivables.map((row) => {
-            const badge = statusStyle(row.status);
-            return (
-              <div
-                key={row.id}
-                style={{
-                  background: "#F8FAFC",
-                  border: "1px solid #E2E8F0",
-                  borderRadius: "16px",
-                  padding: "16px",
-                  display: "grid",
-                  gridTemplateColumns: "1.6fr 1fr 1fr 1fr 1fr 1.2fr",
-                  gap: "12px",
-                  alignItems: "center",
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: "15px" }}>{row.customer}</div>
-                  <div style={{ fontSize: "12px", color: "#64748B", marginTop: "4px" }}>
-                    {row.event}
+        <div className="rounded-[28px] border border-[#d7c49e] bg-white p-6 shadow-sm sm:p-8">
+          <p className="text-xs font-bold uppercase tracking-[0.45em] text-[#9a5f13]">
+            Vendor Connections
+          </p>
+          <h2 className="mt-3 text-2xl font-black text-[#001f1a]">
+            Request Vendor Integration
+          </h2>
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-700">
+            For MVP, vendor connections create a request only. Later iBirdOS can
+            connect vendor email, eVia, EDI, CSV import, or direct API feeds.
+          </p>
+
+          <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {vendorConnections.map((vendor) => {
+              return (
+                <div
+                  key={vendor.name}
+                  className="rounded-[22px] border border-[#e2e8f0] bg-[#fffdf8] p-5"
+                >
+                  <div className="flex items-start justify-between gap-4">
+                    <h3 className="text-xl font-black text-[#001f1a]">
+                      {vendor.name}
+                    </h3>
+                    <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-black text-amber-700">
+                      Later
+                    </span>
                   </div>
-                </div>
-                <div style={{ color: "#4F46E5", fontWeight: 700 }}>{row.invoice}</div>
-                <div style={{ fontWeight: 800 }}>{fmtMoney(row.amount)}</div>
-                <div style={{ color: "#475569", fontWeight: 600 }}>{row.method}</div>
-                <div>
-                  <span
-                    style={{
-                      fontSize: "12px",
-                      fontWeight: 700,
-                      color: badge.color,
-                      background: badge.background,
-                      padding: "6px 10px",
-                      borderRadius: "999px",
-                    }}
-                  >
-                    {row.status}
-                  </span>
-                </div>
-                <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
-                  <a
-                    href="/customer"
-                    style={{
-                      textDecoration: "none",
-                      background: "#FFFFFF",
-                      border: "1px solid #E2E8F0",
-                      color: "#334155",
-                      borderRadius: "8px",
-                      padding: "7px 10px",
-                      fontSize: "13px",
-                      fontWeight: 600,
-                    }}
-                  >
-                    Profile
-                  </a>
+
+                  <p className="mt-3 min-h-[48px] text-sm leading-6 text-slate-700">
+                    {vendor.description}
+                  </p>
+
                   <button
-                    style={{
-                      background: "#16A34A",
-                      color: "#FFFFFF",
-                      borderRadius: "8px",
-                      padding: "7px 10px",
-                      fontSize: "13px",
-                      fontWeight: 700,
-                      border: "none",
-                      cursor: "pointer",
-                    }}
+                    type="button"
+                    className="mt-4 rounded-full border border-[#004c3f] bg-white px-5 py-3 text-sm font-black text-[#004c3f] hover:bg-[#f8faf7]"
                   >
-                    Collect
+                    Request Connection
                   </button>
                 </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: "18px",
-          marginBottom: "18px",
-        }}
-      >
-        <div
-          style={{
-            background: "#FFFFFF",
-            border: "1px solid #E2E8F0",
-            borderRadius: "20px",
-            padding: "22px",
-            boxShadow: "0 10px 30px rgba(15, 23, 42, 0.06)",
-          }}
-        >
-          <div style={{ fontSize: "24px", fontWeight: 800, marginBottom: "18px" }}>
-            Payable Payment Methods
-          </div>
-
-          <div style={{ display: "grid", gap: "14px" }}>
-            {[
-              ["eVia", "Direct to Sysco / US Foods — 1 business day", "Preferred", "#4338CA", "#EEF2FF"],
-              ["ACH Bank Transfer", "Bank to bank — 2 to 3 business days", "Low cost", "#166534", "#DCFCE7"],
-              ["Credit / Debit Card", "Fast vendor payment option if accepted", "Fast", "#92400E", "#FEF3C7"],
-              ["Check", "Physical check — 5 to 7 days", "Traditional", "#64748B", "#F1F5F9"],
-            ].map(([name, desc, badge, color, bg]) => (
-              <div
-                key={String(name)}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: "12px",
-                  paddingBottom: "12px",
-                  borderBottom: "1px solid #F1F5F9",
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 700, marginBottom: "4px" }}>{name}</div>
-                  <div style={{ fontSize: "13px", color: "#64748B" }}>{desc}</div>
-                </div>
-                <span
-                  style={{
-                    alignSelf: "center",
-                    fontSize: "12px",
-                    fontWeight: 700,
-                    color: String(color),
-                    background: String(bg),
-                    padding: "6px 10px",
-                    borderRadius: "999px",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {badge}
-                </span>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
-
-        <div
-          style={{
-            background: "#FFFFFF",
-            border: "1px solid #E2E8F0",
-            borderRadius: "20px",
-            padding: "22px",
-            boxShadow: "0 10px 30px rgba(15, 23, 42, 0.06)",
-          }}
-        >
-          <div style={{ fontSize: "24px", fontWeight: 800, marginBottom: "18px" }}>
-            Receivable Collection Methods
-          </div>
-
-          <div style={{ display: "grid", gap: "14px" }}>
-            {[
-              ["Customer Card on File", "Charge from customer profile default card", "Instant", "#4338CA", "#EEF2FF"],
-              ["ACH Pull", "Charge customer's linked bank account", "B2B", "#166534", "#DCFCE7"],
-              ["Check Collection", "Manual receivable collection", "Manual", "#92400E", "#FEF3C7"],
-            ].map(([name, desc, badge, color, bg]) => (
-              <div
-                key={String(name)}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: "12px",
-                  paddingBottom: "12px",
-                  borderBottom: "1px solid #F1F5F9",
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 700, marginBottom: "4px" }}>{name}</div>
-                  <div style={{ fontSize: "13px", color: "#64748B" }}>{desc}</div>
-                </div>
-                <span
-                  style={{
-                    alignSelf: "center",
-                    fontSize: "12px",
-                    fontWeight: 700,
-                    color: String(color),
-                    background: String(bg),
-                    padding: "6px 10px",
-                    borderRadius: "999px",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {badge}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div
-        style={{
-          background: "#FFFFFF",
-          border: "1px solid #E2E8F0",
-          borderRadius: "20px",
-          padding: "22px",
-          boxShadow: "0 10px 30px rgba(15, 23, 42, 0.06)",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: "18px",
-            flexWrap: "wrap",
-            gap: "12px",
-          }}
-        >
-          <div style={{ fontSize: "24px", fontWeight: 800 }}>
-            Month-End Close Summary
-          </div>
-
-          <a
-            href="/reports"
-            style={{
-              textDecoration: "none",
-              background: "#EEF2FF",
-              color: "#4338CA",
-              padding: "10px 14px",
-              borderRadius: "12px",
-              fontSize: "13px",
-              fontWeight: 700,
-            }}
-          >
-            Run Closing Report
-          </a>
-        </div>
-
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-            gap: "14px",
-          }}
-        >
-          {monthClose.map((item) => (
-            <a
-              key={item.label}
-              href="/reports"
-              style={{
-                textDecoration: "none",
-                background: "#F8FAFC",
-                border: "1px solid #E2E8F0",
-                borderRadius: "16px",
-                padding: "16px",
-                display: "block",
-              }}
-            >
-              <div
-                style={{
-                  fontSize: "11px",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.08em",
-                  color: "#94A3B8",
-                  marginBottom: "8px",
-                  fontWeight: 800,
-                }}
-              >
-                {item.label}
-              </div>
-              <div
-                style={{
-                  fontSize: "26px",
-                  fontWeight: 800,
-                  color: item.color,
-                }}
-              >
-                {item.value}
-              </div>
-            </a>
-          ))}
-        </div>
-
-        <div
-          style={{
-            marginTop: "18px",
-            background: "#F8FAFC",
-            border: "1px solid #E2E8F0",
-            borderRadius: "16px",
-            padding: "16px",
-            fontSize: "14px",
-            color: "#475569",
-            lineHeight: 1.7,
-          }}
-        >
-          This section should connect to your B2B reporting workflow and calculate closing month totals from
-          sales, accounts payable, accounts receivable, inventory, LC, PC, gross profit, operating cost, and final profit margin.
-        </div>
-      </div>
-    </div>
+      </section>
+    </main>
   );
 }

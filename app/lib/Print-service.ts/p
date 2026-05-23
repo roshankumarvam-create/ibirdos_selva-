@@ -1,0 +1,59 @@
+// /lib/print-service.ts
+export async function printToStation(order: any, station: 'FOH' | 'BOH') {
+  const printerIP = station === 'FOH' 
+    ? process.env.FOH_PRINTER_IP 
+    : process.env.BOH_PRINTER_IP;
+  
+  if (!printerIP) {
+    console.log(`⚠️ No printer configured for ${station}`);
+    console.log('Order would print:', JSON.stringify(order, null, 2));
+    return;
+  }
+
+  try {
+    // ESC/POS printer integration
+    const escpos = require('escpos');
+    escpos.USB = require('escpos-usb');
+    
+    const device = new escpos.Network(printerIP);
+    const printer = new escpos.Printer(device);
+    
+    device.open(function(error: any) {
+      if (error) {
+        console.error(`Printer error (${station}):`, error);
+        return;
+      }
+      
+      printer
+        .font('a')
+        .align('ct')
+        .style('bu')
+        .size(2, 2)
+        .text(station === 'FOH' ? 'FRONT OF HOUSE' : 'KITCHEN')
+        .text('━━━━━━━━━━━━━━━')
+        .text(`Order #${order.id || 'NEW'}`)
+        .text('━━━━━━━━━━━━━━━')
+        .align('lt')
+        .size(1, 1);
+      
+      order.items?.forEach((item: any) => {
+        printer.text(`${item.quantity}x ${item.name}`);
+        if (item.mods?.length > 0) {
+          printer.text(`  * ${item.mods.join(', ')}`);
+        }
+      });
+      
+      printer
+        .text('')
+        .text('━━━━━━━━━━━━━━━')
+        .cut()
+        .close();
+    });
+    
+  } catch (error) {
+    console.error('Print error:', error);
+    // Fallback: log to console
+    console.log(`\n[${station} PRINTER]`);
+    console.log(JSON.stringify(order, null, 2));
+  }
+}
