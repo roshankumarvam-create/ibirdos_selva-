@@ -1,7 +1,9 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import postgres from "postgres";
+import { randomUUID } from "node:crypto";
 import { getCurrentUser } from "@/app/lib/currentUser";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -27,28 +29,20 @@ type RouteContext = {
   }>;
 };
 
-type InvoiceLineCategory =
-  | "food_ingredient"
-  | "packaging_supplies"
-  | "labor_service"
-  | "delivery_freight"
-  | "ignore"
-  | string;
+type SqlValue = string | number | boolean | Date | null;
+
+type SqlRow = Record<string, unknown>;
 
 type InvoiceRow = {
   id: string;
   company_id: string;
-  vendor_name: string | null;
-  invoice_number: string | null;
-  invoice_date: string | null;
-  total_amount: string | number | null;
   status: string | null;
 };
 
 type InvoiceLineRow = {
   id: string;
-  company_id: string | null;
   invoice_id: string;
+  company_id: string;
   ingredient_id: string | null;
   item_name: string | null;
   description: string | null;
@@ -56,16 +50,24 @@ type InvoiceLineRow = {
   unit: string | null;
   unit_price: string | number | null;
   line_total: string | number | null;
-  category: InvoiceLineCategory | null;
+  category: string | null;
   status: string | null;
 };
 
 type IngredientRow = {
   id: string;
-  company_id: string;
   name: string;
   latest_cost: string | number | null;
   unit: string | null;
+};
+
+type RecipeRecalcResult = {
+  recipeId: string;
+  recipeName: string;
+  totalFoodCost: number;
+  costPerServing: number;
+  foodCostPercent: number;
+  marginPercent: number;
 };
 
 type EngineResult = {
@@ -77,6 +79,7 @@ type EngineResult = {
   changeAmount: number;
   changePercent: number;
   alertCreated: boolean;
+  recalculatedRecipes: RecipeRecalcResult[];
 };
 
 type ConfirmInvoiceResponse = {
@@ -86,6 +89,7 @@ type ConfirmInvoiceResponse = {
   processedLineCount?: number;
   linesProcessed?: number;
   skippedLineCount?: number;
+  recipeRecalcCount?: number;
   results?: EngineResult[];
   error?: string;
 };
@@ -102,25 +106,60 @@ function getErrorMessage(error: unknown): string {
   return "Unknown confirm invoice error";
 }
 
-function toNumber(value: string | number | null): number {
+function toNumber(value: string | number | null | undefined): number {
   if (typeof value === "number") {
     return Number.isFinite(value) ? value : 0;
   }
 
   if (typeof value === "string") {
-    const parsed = Number(value);
+    const parsed = Number(value.replace(/[$,%\s,]/g, ""));
     return Number.isFinite(parsed) ? parsed : 0;
   }
 
   return 0;
 }
 
-function cleanText(value: string | null): string {
+function cleanText(value: string | null | undefined): string {
   return value?.trim() || "";
 }
 
 function normalizeName(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function quoteIdentifier(value: string): string {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(value)) {
+    throw new Error(`Unsafe SQL identifier: ${value}`);
+  }
+
+  return `"${value}"`;
+}
+
+function isFoodCategory(category: string | null): boolean {
+  const normalized = cleanText(category).toLowerCase();
+
+  return (
+    normalized === "" ||
+    normalized === "food_ingredient" ||
+    normalized === "food ingredient" ||
+    normalized === "ingredient"
+  );
+}
+
+function getLineUnitCost(line: InvoiceLineRow): number {
+  const quantity = toNumber(line.quantity);
+  const unitPrice = toNumber(line.unit_price);
+  const lineTotal = toNumber(line.line_total);
+
+  if (unitPrice > 0) {
+    return unitPrice;
+  }
+
+  if (quantity > 0 && lineTotal > 0) {
+    return Number((lineTotal / quantity).toFixed(4));
+  }
+
+  return lineTotal;
 }
 
 function getChangePercent(oldCost: number, newCost: number): number {
@@ -142,6 +181,34 @@ function shouldCreateAlert(oldCost: number, newCost: number): boolean {
   return changeAmount >= 0.01 || changePercent >= 5;
 }
 
+function readString(row: SqlRow, key: string): string {
+  const value = row[key];
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return String(value);
+  }
+
+  return "";
+}
+
+function readNumber(row: SqlRow, key: string): number {
+  const value = row[key];
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  if (typeof value === "string") {
+    return toNumber(value);
+  }
+
+  return 0;
+}
+
 async function requireCurrentUser(): Promise<CurrentUser> {
   const currentUser = (await getCurrentUser()) as CurrentUser | null;
 
@@ -152,6 +219,96 @@ async function requireCurrentUser(): Promise<CurrentUser> {
   return currentUser;
 }
 
+async function tableExists(tableName: string): Promise<boolean> {
+  const rows = await sql<{ exists: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+      AND table_name = ${tableName}
+    ) AS exists
+  `;
+
+  return rows[0]?.exists === true;
+}
+
+async function getTableColumns(tableName: string): Promise<Set<string>> {
+  const rows = await sql<{ column_name: string }[]>`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+    AND table_name = ${tableName}
+  `;
+
+  return new Set(rows.map((row) => row.column_name));
+}
+
+async function insertFlexibleRow(
+  tableName: string,
+  data: Record<string, SqlValue>,
+): Promise<string | null> {
+  const exists = await tableExists(tableName);
+
+  if (!exists) {
+    return null;
+  }
+
+  const columns = await getTableColumns(tableName);
+  const entries = Object.entries(data).filter(([column]) => columns.has(column));
+
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const columnSql = entries.map(([column]) => quoteIdentifier(column)).join(", ");
+  const valueSql = entries.map((_, index) => `$${index + 1}`).join(", ");
+  const values = entries.map(([, value]) => value);
+
+  const query = `
+    INSERT INTO ${quoteIdentifier(tableName)} (${columnSql})
+    VALUES (${valueSql})
+    RETURNING id::text
+  `;
+
+  const rows = (await sql.unsafe(query, values)) as SqlRow[];
+
+  return readString(rows[0] ?? {}, "id") || null;
+}
+
+async function updateFlexibleRowById(
+  tableName: string,
+  id: string,
+  companyId: string,
+  data: Record<string, SqlValue>,
+): Promise<void> {
+  const exists = await tableExists(tableName);
+
+  if (!exists) {
+    return;
+  }
+
+  const columns = await getTableColumns(tableName);
+  const entries = Object.entries(data).filter(([column]) => columns.has(column));
+
+  if (entries.length === 0) {
+    return;
+  }
+
+  const setSql = entries
+    .map(([column], index) => `${quoteIdentifier(column)} = $${index + 1}`)
+    .join(", ");
+  const values = entries.map(([, value]) => value);
+
+  const query = `
+    UPDATE ${quoteIdentifier(tableName)}
+    SET ${setSql}
+    WHERE id::text = $${values.length + 1}
+    AND company_id::text = $${values.length + 2}
+  `;
+
+  await sql.unsafe(query, [...values, id, companyId]);
+}
+
 async function findOrCreateIngredient(
   companyId: string,
   itemName: string,
@@ -160,56 +317,377 @@ async function findOrCreateIngredient(
 ): Promise<IngredientRow> {
   const cleanName = itemName.trim() || "Unknown Item";
   const normalizedName = normalizeName(cleanName);
+  const columns = await getTableColumns("ingredients");
+  const nameColumn = columns.has("name") ? "name" : "ingredient_name";
+  const costColumn = columns.has("latest_cost")
+    ? "latest_cost"
+    : columns.has("unit_cost")
+      ? "unit_cost"
+      : columns.has("current_cost")
+        ? "current_cost"
+        : "";
+  const unitColumn = columns.has("unit") ? "unit" : "";
 
-  const existingRows = await sql<IngredientRow[]>`
+  const selectCost = costColumn ? `${quoteIdentifier(costColumn)} AS latest_cost` : "0 AS latest_cost";
+  const selectUnit = unitColumn ? `${quoteIdentifier(unitColumn)} AS unit` : "NULL AS unit";
+
+  const existingQuery = `
     SELECT
-      id,
-      company_id,
-      name,
-      latest_cost,
-      unit
+      id::text,
+      ${quoteIdentifier(nameColumn)}::text AS name,
+      ${selectCost},
+      ${selectUnit}
     FROM ingredients
-    WHERE company_id = ${companyId}
-    AND LOWER(name) = ${normalizedName}
+    WHERE company_id::text = $1
+    AND LOWER(${quoteIdentifier(nameColumn)}::text) = $2
     LIMIT 1
   `;
 
-  const existingIngredient = existingRows[0];
+  const existingRows = (await sql.unsafe(existingQuery, [
+    companyId,
+    normalizedName,
+  ])) as SqlRow[];
 
-  if (existingIngredient) {
-    return existingIngredient;
+  const existing = existingRows[0];
+
+  if (existing) {
+    return {
+      id: readString(existing, "id"),
+      name: readString(existing, "name"),
+      latest_cost: readNumber(existing, "latest_cost"),
+      unit: readString(existing, "unit") || unit || "unit",
+    };
   }
 
-  const insertedRows = await sql<IngredientRow[]>`
-    INSERT INTO ingredients (
-      company_id,
-      name,
-      latest_cost,
-      unit,
-      created_at,
-      updated_at
-    )
-    VALUES (
-      ${companyId},
-      ${cleanName},
-      ${newCost}::numeric,
-      ${unit || "unit"},
-      NOW(),
-      NOW()
-    )
-    RETURNING
-      id,
-      company_id,
-      name,
-      latest_cost,
-      unit
+  const ingredientId =
+    (await insertFlexibleRow("ingredients", {
+      id: randomUUID(),
+      company_id: companyId,
+      name: cleanName,
+      ingredient_name: cleanName,
+      category: "Food",
+      unit: unit || "unit",
+      latest_cost: newCost,
+      unit_cost: newCost,
+      current_cost: newCost,
+      created_at: new Date(),
+      updated_at: new Date(),
+    })) ?? randomUUID();
+
+  return {
+    id: ingredientId,
+    name: cleanName,
+    latest_cost: newCost,
+    unit: unit || "unit",
+  };
+}
+
+async function updateIngredientCost(
+  companyId: string,
+  ingredientId: string,
+  unit: string,
+  newCost: number,
+): Promise<void> {
+  await updateFlexibleRowById("ingredients", ingredientId, companyId, {
+    latest_cost: newCost,
+    unit_cost: newCost,
+    current_cost: newCost,
+    unit,
+    updated_at: new Date(),
+  });
+}
+
+async function createPriceHistory(
+  companyId: string,
+  ingredientId: string,
+  ingredientName: string,
+  invoiceId: string,
+  oldCost: number,
+  newCost: number,
+): Promise<void> {
+  const changeAmount = Number((newCost - oldCost).toFixed(4));
+  const changePercent = getChangePercent(oldCost, newCost);
+
+  await insertFlexibleRow("price_history", {
+    id: randomUUID(),
+    company_id: companyId,
+    ingredient_id: ingredientId,
+    ingredient_name: ingredientName,
+    invoice_id: invoiceId,
+    old_cost: oldCost,
+    new_cost: newCost,
+    change_amount: changeAmount,
+    change_percent: changePercent,
+    source_type: "invoice_confirm",
+    source: "invoice_confirm",
+    created_at: new Date(),
+    updated_at: new Date(),
+  });
+}
+
+async function createCostAlert(
+  companyId: string,
+  ingredientId: string,
+  ingredientName: string,
+  oldCost: number,
+  newCost: number,
+): Promise<boolean> {
+  if (!shouldCreateAlert(oldCost, newCost)) {
+    return false;
+  }
+
+  const changeAmount = Number((newCost - oldCost).toFixed(4));
+  const changePercent = getChangePercent(oldCost, newCost);
+
+  await insertFlexibleRow("alerts", {
+    id: randomUUID(),
+    company_id: companyId,
+    title: `${ingredientName} cost increased`,
+    message: `${ingredientName} increased from $${oldCost.toFixed(
+      2,
+    )} to $${newCost.toFixed(2)}. Review recipe and event margins.`,
+    alert_type: "PRICE_INCREASE",
+    type: "PRICE_INCREASE",
+    severity: "warning",
+    status: "open",
+    ingredient_id: ingredientId,
+    ingredient_name: ingredientName,
+    old_cost: oldCost,
+    new_cost: newCost,
+    change_amount: changeAmount,
+    change_percent: changePercent,
+    created_at: new Date(),
+    updated_at: new Date(),
+  });
+
+  return true;
+}
+
+async function updateInvoiceLineStatus(
+  companyId: string,
+  invoiceId: string,
+  lineId: string,
+  ingredientId: string | null,
+  status: string,
+): Promise<void> {
+  const columns = await getTableColumns("invoice_lines");
+  const data: Record<string, SqlValue> = {
+    status,
+    updated_at: new Date(),
+  };
+
+  if (ingredientId && columns.has("ingredient_id")) {
+    data.ingredient_id = ingredientId;
+  }
+
+  const entries = Object.entries(data).filter(([column]) => columns.has(column));
+
+  if (entries.length === 0) {
+    return;
+  }
+
+  const setSql = entries
+    .map(([column], index) => `${quoteIdentifier(column)} = $${index + 1}`)
+    .join(", ");
+  const values = entries.map(([, value]) => value);
+
+  const query = `
+    UPDATE invoice_lines
+    SET ${setSql}
+    WHERE id::text = $${values.length + 1}
+    AND invoice_id::text = $${values.length + 2}
+    AND company_id::text = $${values.length + 3}
   `;
 
-  return insertedRows[0];
+  await sql.unsafe(query, [...values, lineId, invoiceId, companyId]);
+}
+
+async function updateRecipeIngredientCosts(
+  companyId: string,
+  ingredientId: string,
+  newCost: number,
+): Promise<string[]> {
+  const exists = await tableExists("recipe_ingredients");
+
+  if (!exists) {
+    return [];
+  }
+
+  const columns = await getTableColumns("recipe_ingredients");
+  const hasRecipeId = columns.has("recipe_id");
+  const hasQuantity = columns.has("quantity");
+
+  if (!hasRecipeId || !hasQuantity) {
+    return [];
+  }
+
+  const rows = (await sql.unsafe(
+    `
+      SELECT
+        id::text,
+        recipe_id::text,
+        quantity
+      FROM recipe_ingredients
+      WHERE company_id::text = $1
+      AND ingredient_id::text = $2
+    `,
+    [companyId, ingredientId],
+  )) as SqlRow[];
+
+  const recipeIds = new Set<string>();
+
+  for (const row of rows) {
+    const recipeIngredientId = readString(row, "id");
+    const recipeId = readString(row, "recipe_id");
+    const quantity = readNumber(row, "quantity");
+    const lineCost = Number((quantity * newCost).toFixed(4));
+
+    if (recipeId) {
+      recipeIds.add(recipeId);
+    }
+
+    if (recipeIngredientId) {
+      await updateFlexibleRowById(
+        "recipe_ingredients",
+        recipeIngredientId,
+        companyId,
+        {
+          unit_cost: newCost,
+          latest_cost: newCost,
+          line_cost: lineCost,
+          total_cost: lineCost,
+          updated_at: new Date(),
+        },
+      );
+    }
+  }
+
+  return Array.from(recipeIds);
+}
+
+async function recalculateRecipe(
+  companyId: string,
+  recipeId: string,
+): Promise<RecipeRecalcResult | null> {
+  const recipeIngredientsExists = await tableExists("recipe_ingredients");
+  const recipesExists = await tableExists("recipes");
+
+  if (!recipeIngredientsExists || !recipesExists) {
+    return null;
+  }
+
+  const recipeIngredientColumns = await getTableColumns("recipe_ingredients");
+  const costExpression = recipeIngredientColumns.has("line_cost")
+    ? "COALESCE(line_cost, 0)"
+    : recipeIngredientColumns.has("total_cost")
+      ? "COALESCE(total_cost, 0)"
+      : recipeIngredientColumns.has("unit_cost")
+        ? "COALESCE(quantity, 0) * COALESCE(unit_cost, 0)"
+        : recipeIngredientColumns.has("latest_cost")
+          ? "COALESCE(quantity, 0) * COALESCE(latest_cost, 0)"
+          : "0";
+
+  const totalRows = (await sql.unsafe(
+    `
+      SELECT COALESCE(SUM(${costExpression}), 0) AS total_food_cost
+      FROM recipe_ingredients
+      WHERE company_id::text = $1
+      AND recipe_id::text = $2
+    `,
+    [companyId, recipeId],
+  )) as SqlRow[];
+
+  const totalFoodCost = Number(readNumber(totalRows[0] ?? {}, "total_food_cost").toFixed(4));
+
+  const recipeColumns = await getTableColumns("recipes");
+  const nameSelect = recipeColumns.has("name")
+    ? "name::text AS recipe_name"
+    : recipeColumns.has("recipe_name")
+      ? "recipe_name::text AS recipe_name"
+      : "'Recipe' AS recipe_name";
+  const servingsSelect = recipeColumns.has("servings")
+    ? "servings"
+    : recipeColumns.has("yield")
+      ? "yield"
+      : "1 AS servings";
+  const sellingPriceSelect = recipeColumns.has("selling_price")
+    ? "selling_price"
+    : recipeColumns.has("price_per_serving")
+      ? "price_per_serving"
+      : "0 AS selling_price";
+
+  const recipeRows = (await sql.unsafe(
+    `
+      SELECT
+        id::text,
+        ${nameSelect},
+        ${servingsSelect} AS servings,
+        ${sellingPriceSelect} AS selling_price
+      FROM recipes
+      WHERE company_id::text = $1
+      AND id::text = $2
+      LIMIT 1
+    `,
+    [companyId, recipeId],
+  )) as SqlRow[];
+
+  const recipe = recipeRows[0];
+
+  if (!recipe) {
+    return null;
+  }
+
+  const servings = Math.max(readNumber(recipe, "servings"), 1);
+  const sellingPrice = readNumber(recipe, "selling_price");
+  const costPerServing = Number((totalFoodCost / servings).toFixed(4));
+  const foodCostPercent =
+    sellingPrice > 0 ? Number(((costPerServing / sellingPrice) * 100).toFixed(2)) : 0;
+  const marginPercent =
+    sellingPrice > 0
+      ? Number((((sellingPrice - costPerServing) / sellingPrice) * 100).toFixed(2))
+      : 0;
+
+  await updateFlexibleRowById("recipes", recipeId, companyId, {
+    total_food_cost: totalFoodCost,
+    total_cost: totalFoodCost,
+    cost_per_serving: costPerServing,
+    food_cost_percent: foodCostPercent,
+    margin_percent: marginPercent,
+    current_margin_percent: marginPercent,
+    updated_at: new Date(),
+  });
+
+  return {
+    recipeId,
+    recipeName: readString(recipe, "recipe_name") || "Recipe",
+    totalFoodCost,
+    costPerServing,
+    foodCostPercent,
+    marginPercent,
+  };
+}
+
+async function recalculateRecipesForIngredient(
+  companyId: string,
+  ingredientId: string,
+  newCost: number,
+): Promise<RecipeRecalcResult[]> {
+  const recipeIds = await updateRecipeIngredientCosts(companyId, ingredientId, newCost);
+  const results: RecipeRecalcResult[] = [];
+
+  for (const recipeId of recipeIds) {
+    const result = await recalculateRecipe(companyId, recipeId);
+
+    if (result) {
+      results.push(result);
+    }
+  }
+
+  return results;
 }
 
 export async function POST(
-  _request: Request,
+  _request: NextRequest,
   context: RouteContext,
 ): Promise<NextResponse<ConfirmInvoiceResponse>> {
   try {
@@ -218,16 +696,12 @@ export async function POST(
 
     const invoiceRows = await sql<InvoiceRow[]>`
       SELECT
-        id,
-        company_id,
-        vendor_name,
-        invoice_number,
-        invoice_date,
-        total_amount,
+        id::text,
+        company_id::text,
         status
       FROM invoices
-      WHERE id = ${invoiceId}
-      AND company_id = ${currentUser.company_id}
+      WHERE id::text = ${invoiceId}
+      AND company_id::text = ${currentUser.company_id}
       LIMIT 1
     `;
 
@@ -245,60 +719,48 @@ export async function POST(
 
     const allInvoiceLines = await sql<InvoiceLineRow[]>`
       SELECT
-        id,
-        company_id,
-        invoice_id,
-        ingredient_id,
+        id::text,
+        invoice_id::text,
+        company_id::text,
+        ingredient_id::text,
         item_name,
         description,
         quantity,
         unit,
         unit_price,
         line_total,
-        COALESCE(category, 'food_ingredient') AS category,
+        category,
         status
       FROM invoice_lines
-      WHERE invoice_id = ${invoiceId}
-      AND company_id = ${currentUser.company_id}
-      ORDER BY created_at ASC
+      WHERE invoice_id::text = ${invoiceId}
+      AND company_id::text = ${currentUser.company_id}
+      ORDER BY created_at ASC NULLS LAST
     `;
 
-    if (allInvoiceLines.length === 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "No invoice lines found for this invoice.",
-        },
-        { status: 400 },
-      );
-    }
-
-    const foodInvoiceLines = allInvoiceLines.filter((line) => {
-      return (line.category ?? "food_ingredient") === "food_ingredient";
-    });
-
-    const skippedLineCount = allInvoiceLines.length - foodInvoiceLines.length;
-
-    if (foodInvoiceLines.length === 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "No food ingredient lines selected. Choose Food Ingredient for at least one line before confirming.",
-        },
-        { status: 400 },
-      );
-    }
-
+    const foodLines = allInvoiceLines.filter((line) => isFoodCategory(line.category));
+    const skippedLines = allInvoiceLines.filter((line) => !isFoodCategory(line.category));
     const results: EngineResult[] = [];
+    const recipeIdsRecalculated = new Set<string>();
 
-    for (const line of foodInvoiceLines) {
-      const itemName = cleanText(line.item_name) || "Unknown Item";
+    for (const line of foodLines) {
+      const itemName =
+        cleanText(line.item_name) ||
+        cleanText(line.description) ||
+        "Unknown Invoice Item";
       const unit = cleanText(line.unit) || "unit";
-      const quantity = toNumber(line.quantity);
-      const unitPrice = toNumber(line.unit_price);
-      const lineTotal = toNumber(line.line_total);
-      const newCost =
-        unitPrice > 0 ? unitPrice : quantity > 0 ? lineTotal / quantity : 0;
+      const newCost = getLineUnitCost(line);
+
+      if (newCost <= 0) {
+        await updateInvoiceLineStatus(
+          currentUser.company_id,
+          invoiceId,
+          line.id,
+          null,
+          "needs_review",
+        );
+
+        continue;
+      }
 
       const ingredient = await findOrCreateIngredient(
         currentUser.company_id,
@@ -310,100 +772,43 @@ export async function POST(
       const oldCost = toNumber(ingredient.latest_cost);
       const changeAmount = Number((newCost - oldCost).toFixed(4));
       const changePercent = getChangePercent(oldCost, newCost);
-      const alertNeeded = shouldCreateAlert(oldCost, newCost);
 
-      await sql`
-        UPDATE ingredients
-        SET
-          latest_cost = CASE
-            WHEN ${newCost}::numeric > 0::numeric THEN ${newCost}::numeric
-            ELSE latest_cost
-          END,
-          unit = COALESCE(NULLIF(${unit}, ''), unit),
-          updated_at = NOW()
-        WHERE id = ${ingredient.id}
-        AND company_id = ${currentUser.company_id}
-      `;
+      await updateIngredientCost(currentUser.company_id, ingredient.id, unit, newCost);
 
-      await sql`
-        UPDATE invoice_lines
-        SET
-          ingredient_id = ${ingredient.id},
-          status = 'confirmed',
-          updated_at = NOW()
-        WHERE id = ${line.id}
-        AND company_id = ${currentUser.company_id}
-      `;
+      await createPriceHistory(
+        currentUser.company_id,
+        ingredient.id,
+        ingredient.name || itemName,
+        invoiceId,
+        oldCost,
+        newCost,
+      );
 
-      await sql`
-        INSERT INTO price_history (
-          company_id,
-          ingredient_id,
-          ingredient_name,
-          invoice_id,
-          invoice_line_id,
-          vendor_name,
-          old_cost,
-          new_cost,
-          change_amount,
-          change_percent,
-          unit,
-          source,
-          created_at
-        )
-        VALUES (
-          ${currentUser.company_id},
-          ${ingredient.id},
-          ${itemName},
-          ${invoiceId},
-          ${line.id},
-          ${invoice.vendor_name ?? "Unknown Vendor"},
-          ${oldCost}::numeric,
-          ${newCost}::numeric,
-          ${changeAmount}::numeric,
-          ${changePercent}::numeric,
-          ${unit},
-          'invoice_confirm',
-          NOW()
-        )
-      `;
+      const alertCreated = await createCostAlert(
+        currentUser.company_id,
+        ingredient.id,
+        ingredient.name || itemName,
+        oldCost,
+        newCost,
+      );
 
-      if (alertNeeded) {
-        await sql`
-          INSERT INTO alerts (
-            company_id,
-            title,
-            message,
-            alert_type,
-            severity,
-            status,
-            ingredient_id,
-            ingredient_name,
-            old_cost,
-            new_cost,
-            change_percent,
-            invoice_id,
-            created_at,
-            updated_at
-          )
-          VALUES (
-            ${currentUser.company_id},
-            ${`${itemName} cost increased`},
-            ${`${itemName} increased from $${oldCost.toFixed(2)} to $${newCost.toFixed(2)} per ${unit}.`},
-            'cost_increase',
-            'warning',
-            'open',
-            ${ingredient.id},
-            ${itemName},
-            ${oldCost}::numeric,
-            ${newCost}::numeric,
-            ${changePercent}::numeric,
-            ${invoiceId},
-            NOW(),
-            NOW()
-          )
-        `;
+      const recalculatedRecipes = await recalculateRecipesForIngredient(
+        currentUser.company_id,
+        ingredient.id,
+        newCost,
+      );
+
+      for (const recipe of recalculatedRecipes) {
+        recipeIdsRecalculated.add(recipe.recipeId);
       }
+
+      await updateInvoiceLineStatus(
+        currentUser.company_id,
+        invoiceId,
+        line.id,
+        ingredient.id,
+        "processed",
+      );
 
       results.push({
         lineId: line.id,
@@ -413,27 +818,28 @@ export async function POST(
         newCost,
         changeAmount,
         changePercent,
-        alertCreated: alertNeeded,
+        alertCreated,
+        recalculatedRecipes,
       });
     }
 
-    await sql`
-      UPDATE invoice_lines
-      SET
-        status = 'skipped',
-        updated_at = NOW()
-      WHERE invoice_id = ${invoiceId}
-      AND company_id = ${currentUser.company_id}
-      AND COALESCE(category, 'food_ingredient') <> 'food_ingredient'
-    `;
+    for (const line of skippedLines) {
+      await updateInvoiceLineStatus(
+        currentUser.company_id,
+        invoiceId,
+        line.id,
+        line.ingredient_id,
+        "skipped",
+      );
+    }
 
     await sql`
       UPDATE invoices
       SET
         status = 'confirmed',
         updated_at = NOW()
-      WHERE id = ${invoiceId}
-      AND company_id = ${currentUser.company_id}
+      WHERE id::text = ${invoiceId}
+      AND company_id::text = ${currentUser.company_id}
     `;
 
     return NextResponse.json({
@@ -442,7 +848,8 @@ export async function POST(
       status: "confirmed",
       processedLineCount: results.length,
       linesProcessed: results.length,
-      skippedLineCount,
+      skippedLineCount: skippedLines.length,
+      recipeRecalcCount: recipeIdsRecalculated.size,
       results,
     });
   } catch (error: unknown) {
