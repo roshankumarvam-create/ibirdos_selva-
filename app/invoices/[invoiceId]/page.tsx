@@ -607,7 +607,7 @@ export default function InvoiceDetailPage() {
               <p className="text-xs font-black uppercase tracking-[0.45em] text-[#9A5F13]">
                 Invoice Lines
               </p>
-              <h2 className="mt-4 text-2xl font-black">SAP-style Line Review</h2>
+              <h2 className="mt-4 text-2xl font-black">Invoice Line Review</h2>
               <p className="mt-3 text-sm leading-6 text-slate-700">
                 Use category to control what updates ingredient costs. Long OCR text is hidden under details.
               </p>
