@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import postgres from "postgres";
 import { getSessionFromRequest } from "../../lib/server-auth";
-import { request } from "https";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,9 +64,15 @@ type InvoiceResponse = {
 
 type CreateInvoiceBody = {
   vendorName?: string;
+  vendor_name?: string;
   invoiceNumber?: string;
+  invoice_number?: string;
+  trackingNumber?: string;
+  tracking_number?: string;
   invoiceDate?: string;
-  totalAmount?: number;
+  invoice_date?: string;
+  totalAmount?: number | string;
+  total_amount?: number | string;
   status?: string;
 };
 
@@ -87,6 +92,7 @@ type InvoicesApiResponse = {
 type CreateInvoiceResponse = {
   success: boolean;
   invoice?: InvoiceResponse;
+  duplicateInvoiceId?: string;
   error?: string;
 };
 
@@ -100,6 +106,39 @@ function getErrorMessage(error: unknown): string {
   }
 
   return "Failed to load invoices";
+}
+
+function isDuplicateInvoiceError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+
+  const errorObject = error as {
+    code?: unknown;
+    constraint_name?: unknown;
+    constraint?: unknown;
+    message?: unknown;
+  };
+
+  const code = typeof errorObject.code === "string" ? errorObject.code : "";
+  const constraintName =
+    typeof errorObject.constraint_name === "string"
+      ? errorObject.constraint_name
+      : typeof errorObject.constraint === "string"
+        ? errorObject.constraint
+        : "";
+  const message =
+    typeof errorObject.message === "string" ? errorObject.message : "";
+
+  return (
+    code === "23505" ||
+    constraintName.includes("invoices_company_vendor_invoice_unique") ||
+    message.includes("invoices_company_vendor_invoice_unique")
+  );
+}
+
+function cleanText(value: string | null | undefined): string {
+  return value?.trim() ?? "";
 }
 
 function toNumber(value: string | number | null | undefined): number {
@@ -136,9 +175,24 @@ function formatInvoice(row: InvoiceRow): InvoiceResponse {
   };
 }
 
+function makeFinalInvoiceNumber(
+  invoiceNumber: string,
+  trackingNumber: string,
+): string {
+  if (invoiceNumber) {
+    return invoiceNumber;
+  }
+
+  if (trackingNumber) {
+    return `TRACK-${trackingNumber.replace(/^TRACK-/i, "")}`;
+  }
+
+  return `MANUAL-${Date.now()}`;
+}
+
 async function getSessionCompanyId(request: NextRequest): Promise<string> {
   const session = (await getSessionFromRequest(request)) as CurrentSession | null;
-  const companyId = session?.companyId || session?.company_id;
+  const companyId = session?.companyId ?? session?.company_id ?? "";
 
   if (!companyId) {
     throw new Error("Unauthorized: missing company_id");
@@ -155,21 +209,21 @@ export async function GET(
 
     const invoices = await sql<InvoiceRow[]>`
       SELECT
-        id,
-        company_id,
+        id::text,
+        company_id::text,
         vendor_name,
         invoice_number,
-        invoice_date,
+        invoice_date::text,
         total_amount,
         status,
         payment_status,
-        paid_at,
+        paid_at::text,
         payment_method,
         payment_reference,
-        created_at,
-        updated_at
+        created_at::text,
+        updated_at::text
       FROM invoices
-      WHERE company_id = ${companyId}
+      WHERE company_id::text = ${companyId}
       ORDER BY created_at DESC NULLS LAST
       LIMIT 100
     `;
@@ -185,7 +239,7 @@ export async function GET(
           WHERE status IN ('confirmed', 'processed')
         ) AS confirmed
       FROM invoices
-      WHERE company_id = ${companyId}
+      WHERE company_id::text = ${companyId}
     `;
 
     const stats = statsRows[0];
@@ -226,34 +280,46 @@ export async function POST(
     const companyId = await getSessionCompanyId(request);
     const body = (await request.json()) as CreateInvoiceBody;
 
-    const vendorName = body.vendorName?.trim() || "Manual Vendor";
-    const invoiceNumber = body.invoiceNumber?.trim() || "";
-    const invoiceDate = body.invoiceDate?.trim() || new Date().toISOString().slice(0, 10);
+    const vendorName =
+      cleanText(body.vendorName) || cleanText(body.vendor_name) || "Manual Vendor";
+    const rawInvoiceNumber =
+      cleanText(body.invoiceNumber) || cleanText(body.invoice_number);
+    const trackingNumber =
+      cleanText(body.trackingNumber) || cleanText(body.tracking_number);
+    const finalInvoiceNumber = makeFinalInvoiceNumber(
+      rawInvoiceNumber,
+      trackingNumber,
+    );
+    const invoiceDate =
+      cleanText(body.invoiceDate) ||
+      cleanText(body.invoice_date) ||
+      new Date().toISOString().slice(0, 10);
     const totalAmount =
-      typeof body.totalAmount === "number" && Number.isFinite(body.totalAmount)
-        ? body.totalAmount
-        : 0;
-    const status = body.status?.trim() || "needs_review";
-    const duplicateRows = await sql<{ id: string }[]>` // CHANGED
-  SELECT id::text // CHANGED
-  FROM invoices // CHANGED
-  WHERE company_id::text = ${companyId} // CHANGED
-    AND LOWER(TRIM(vendor_name)) = LOWER(TRIM(${vendorName})) // CHANGED
-    AND TRIM(invoice_number) = TRIM(${invoiceNumber}) // CHANGED
-    AND TRIM(invoice_number) <> '' // CHANGED
-  LIMIT 1 // CHANGED
-`; 
+      toNumber(body.totalAmount) > 0
+        ? toNumber(body.totalAmount)
+        : toNumber(body.total_amount);
+    const status = cleanText(body.status) || "needs_review";
 
-if (duplicateRows[0]) {
-  return NextResponse.json( 
-    { 
-      success: false,
-      error: "Duplicate invoice: this vendor invoice number already exists.", 
-      duplicateInvoiceId: duplicateRows[0].id,
-    }, 
-    { status: 409 }, 
-  ); 
-} 
+    const duplicateRows = await sql<{ id: string }[]>`
+      SELECT id::text
+      FROM invoices
+      WHERE company_id::text = ${companyId}
+        AND LOWER(TRIM(vendor_name)) = LOWER(TRIM(${vendorName}))
+        AND TRIM(invoice_number) = TRIM(${finalInvoiceNumber})
+        AND TRIM(invoice_number) <> ''
+      LIMIT 1
+    `;
+
+    if (duplicateRows[0]) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Duplicate invoice: this vendor invoice number already exists.",
+          duplicateInvoiceId: duplicateRows[0].id,
+        },
+        { status: 409 },
+      );
+    }
 
     const insertedRows = await sql<InvoiceRow[]>`
       INSERT INTO invoices (
@@ -270,7 +336,7 @@ if (duplicateRows[0]) {
       VALUES (
         ${companyId},
         ${vendorName},
-        ${invoiceNumber},
+        ${finalInvoiceNumber},
         ${invoiceDate},
         ${totalAmount}::numeric,
         ${status},
@@ -279,19 +345,19 @@ if (duplicateRows[0]) {
         NOW()
       )
       RETURNING
-        id,
-        company_id,
+        id::text,
+        company_id::text,
         vendor_name,
         invoice_number,
-        invoice_date,
+        invoice_date::text,
         total_amount,
         status,
         payment_status,
-        paid_at,
+        paid_at::text,
         payment_method,
         payment_reference,
-        created_at,
-        updated_at
+        created_at::text,
+        updated_at::text
     `;
 
     return NextResponse.json({
@@ -299,6 +365,16 @@ if (duplicateRows[0]) {
       invoice: formatInvoice(insertedRows[0]),
     });
   } catch (error: unknown) {
+    if (isDuplicateInvoiceError(error)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Duplicate invoice: this vendor invoice number already exists.",
+        },
+        { status: 409 },
+      );
+    }
+
     return NextResponse.json(
       {
         success: false,
