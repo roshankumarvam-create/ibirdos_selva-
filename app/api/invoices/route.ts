@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import postgres from "postgres";
 import { getSessionFromRequest } from "../../lib/server-auth";
+import { request } from "https";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,6 +21,7 @@ type CurrentSession = {
   email?: string;
   role?: string;
   company_id?: string;
+  companyId?: string;
 };
 
 type InvoiceRow = {
@@ -134,21 +136,22 @@ function formatInvoice(row: InvoiceRow): InvoiceResponse {
   };
 }
 
-function getSessionCompanyId(request: NextRequest): string {
-  const session = getSessionFromRequest(request) as CurrentSession | null;
+async function getSessionCompanyId(request: NextRequest): Promise<string> {
+  const session = (await getSessionFromRequest(request)) as CurrentSession | null;
+  const companyId = session?.companyId || session?.company_id;
 
-  if (!session?.company_id) {
+  if (!companyId) {
     throw new Error("Unauthorized: missing company_id");
   }
 
-  return session.company_id;
+  return companyId;
 }
 
 export async function GET(
   request: NextRequest,
 ): Promise<NextResponse<InvoicesApiResponse>> {
   try {
-    const companyId = getSessionCompanyId(request);
+    const companyId = await getSessionCompanyId(request);
 
     const invoices = await sql<InvoiceRow[]>`
       SELECT
@@ -220,7 +223,7 @@ export async function POST(
   request: NextRequest,
 ): Promise<NextResponse<CreateInvoiceResponse>> {
   try {
-    const companyId = getSessionCompanyId(request);
+    const companyId = await getSessionCompanyId(request);
     const body = (await request.json()) as CreateInvoiceBody;
 
     const vendorName = body.vendorName?.trim() || "Manual Vendor";
@@ -231,6 +234,26 @@ export async function POST(
         ? body.totalAmount
         : 0;
     const status = body.status?.trim() || "needs_review";
+    const duplicateRows = await sql<{ id: string }[]>` // CHANGED
+  SELECT id::text // CHANGED
+  FROM invoices // CHANGED
+  WHERE company_id::text = ${companyId} // CHANGED
+    AND LOWER(TRIM(vendor_name)) = LOWER(TRIM(${vendorName})) // CHANGED
+    AND TRIM(invoice_number) = TRIM(${invoiceNumber}) // CHANGED
+    AND TRIM(invoice_number) <> '' // CHANGED
+  LIMIT 1 // CHANGED
+`; 
+
+if (duplicateRows[0]) {
+  return NextResponse.json( 
+    { 
+      success: false,
+      error: "Duplicate invoice: this vendor invoice number already exists.", 
+      duplicateInvoiceId: duplicateRows[0].id,
+    }, 
+    { status: 409 }, 
+  ); 
+} 
 
     const insertedRows = await sql<InvoiceRow[]>`
       INSERT INTO invoices (
