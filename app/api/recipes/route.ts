@@ -147,7 +147,8 @@ export async function GET(
   request: NextRequest,
 ): Promise<NextResponse<GetApiResponse>> {
   try {
-    const currentUser = await getCurrentUser(); 
+    const currentUser = await getCurrentUser();
+    const normalizedRole = String(currentUser.role ?? "").toUpperCase();
     await ensureRecipeColumns();
 
     const searchParams = request.nextUrl.searchParams;
@@ -166,10 +167,10 @@ export async function GET(
       success: true,
       recipes,
       data: recipes,
-      role: currentUser.role,
-      canCreateRecipe: canManageRecipes(currentUser.role),
-      canEditRecipe: canManageRecipes(currentUser.role),
-      canPrintRecipe: canViewRecipes(currentUser.role),
+      role: normalizedRole,
+      canCreateRecipe: canManageRecipes(normalizedRole),
+      canEditRecipe: canManageRecipes(normalizedRole),
+      canPrintRecipe: canViewRecipes(normalizedRole),
     });
   } catch (error: unknown) {
     console.error("GET /api/recipes error:", error);
@@ -191,6 +192,7 @@ export async function POST(
 ): Promise<NextResponse<PostApiResponse>> {
   try {
     const currentUser = await getCurrentUser();
+    const normalizedRole = String(currentUser.role ?? "").toUpperCase();
     await ensureRecipeColumns();
 
     if (!canManageRecipes(currentUser.role)) {
