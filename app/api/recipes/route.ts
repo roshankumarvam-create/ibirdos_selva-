@@ -168,9 +168,9 @@ export async function GET(
       recipes,
       data: recipes,
       role: normalizedRole,
-      canCreateRecipe: canManageRecipes(normalizedRole),
-      canEditRecipe: canManageRecipes(normalizedRole),
-      canPrintRecipe: canViewRecipes(normalizedRole),
+      canCreateRecipe: ["OWNER", "MANAGER", "CHEF"].includes(normalizedRole),
+      canEditRecipe: ["OWNER", "MANAGER", "CHEF"].includes(normalizedRole), 
+      canPrintRecipe: ["OWNER", "MANAGER", "CHEF", "KITCHEN_STAFF"].includes(normalizedRole),
     });
   } catch (error: unknown) {
     console.error("GET /api/recipes error:", error);
