@@ -143,7 +143,7 @@ type PostApiResponse =
       error: string;
     };
 
-export async function GET(
+ export async function GET(
   request: NextRequest,
 ): Promise<NextResponse<GetApiResponse>> {
   try {
