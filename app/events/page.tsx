@@ -227,11 +227,22 @@ export default function EventsPage() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
+                body: JSON.stringify({
           name: cleanName,
+          eventName: cleanName, 
           eventDate: cleanDate,
+          event_date: cleanDate, 
           guestCount: Number.isFinite(cleanGuestCount) ? cleanGuestCount : 0,
+          guest_count: Number.isFinite(cleanGuestCount) ? cleanGuestCount : 0, 
           serviceType,
+          service_type: serviceType, 
+          status: "DRAFT" as EventStatus, 
+          revenue: 0, 
+          foodCost: 0, 
+          food_cost: 0, 
+          totalCost: 0, 
+          total_cost: 0, 
+          margin: 0, 
         }),
       });
 

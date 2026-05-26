@@ -591,6 +591,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> { // CHAN
   }
 }
 
-export async function POST(request: NextRequest): Promise<NextResponse> { // CHANGED
-  return GET(request); // CHANGED
+export async function POST(request: NextRequest): Promise<NextResponse> { 
+  return GET(request); 
 }

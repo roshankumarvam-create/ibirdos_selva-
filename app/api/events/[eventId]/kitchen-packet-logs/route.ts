@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import postgres from "postgres";
-import { getSessionFromRequest } from "@/app/lib/server-auth";
+import { getCurrentUser } from "@/app/lib/currentUser";
 
 export const dynamic = "force-dynamic";
 
@@ -41,13 +41,6 @@ type CurrentUser = {
   email: string;
   role: string;
   company_id: string;
-};
-
-type SessionUser = {
-  user_id?: string;
-  email?: string;
-  role?: string;
-  company_id?: string;
 };
 
 type KitchenPacketLogBody = {
@@ -153,9 +146,9 @@ function cleanNullableString(value: unknown): string | null {
     return null;
   }
 
-  const trimmed = value.trim();
+  const trimmedValue = value.trim();
 
-  return trimmed.length > 0 ? trimmed : null;
+  return trimmedValue.length > 0 ? trimmedValue : null;
 }
 
 async function readJsonBody<TBody>(request: NextRequest): Promise<TBody> {
@@ -166,25 +159,24 @@ async function readJsonBody<TBody>(request: NextRequest): Promise<TBody> {
   }
 }
 
-async function getSafeCurrentUser(request: NextRequest): Promise<CurrentUser> {
-  const session = (await getSessionFromRequest(request)) as SessionUser | null;
+async function getSafeCurrentUser(): Promise<CurrentUser> {
+  const currentUser = (await getCurrentUser()) as Partial<CurrentUser> | null;
 
   if (
-    !session ||
-    typeof session.user_id !== "string" ||
-    typeof session.email !== "string" ||
-    typeof session.role !== "string" ||
-    typeof session.company_id !== "string" ||
-    session.company_id.trim().length === 0
+    !currentUser ||
+    typeof currentUser.id !== "string" ||
+    typeof currentUser.email !== "string" ||
+    typeof currentUser.company_id !== "string" ||
+    currentUser.company_id.trim().length === 0
   ) {
     throw new UnauthorizedError();
   }
 
   return {
-    id: session.user_id,
-    email: session.email,
-    role: session.role,
-    company_id: session.company_id,
+    id: currentUser.id,
+    email: currentUser.email,
+    role: typeof currentUser.role === "string" ? currentUser.role : "user",
+    company_id: currentUser.company_id,
   };
 }
 
@@ -320,7 +312,7 @@ export async function GET(
   context: RouteContext,
 ): Promise<NextResponse> {
   try {
-    const currentUser = await getSafeCurrentUser(request);
+    const currentUser = await getSafeCurrentUser();
     const { eventId } = await context.params;
     const checklistType = request.nextUrl.searchParams.get("checklistType");
 
@@ -344,7 +336,23 @@ export async function GET(
     const logs =
       checklistType && isChecklistType(checklistType)
         ? await sql`
-            SELECT *
+            SELECT
+              id,
+              company_id,
+              event_id,
+              event_recipe_line_id,
+              checklist_type,
+              item_name,
+              status,
+              food_type,
+              kitchen_temp,
+              loading_temp,
+              delivery_temp,
+              checked_by,
+              checked_at::text AS checked_at,
+              notes,
+              created_at::text AS created_at,
+              updated_at::text AS updated_at
             FROM kitchen_packet_logs
             WHERE event_id::text = ${eventId}
               AND company_id::text = ${currentUser.company_id}
@@ -352,7 +360,23 @@ export async function GET(
             ORDER BY created_at ASC;
           `
         : await sql`
-            SELECT *
+            SELECT
+              id,
+              company_id,
+              event_id,
+              event_recipe_line_id,
+              checklist_type,
+              item_name,
+              status,
+              food_type,
+              kitchen_temp,
+              loading_temp,
+              delivery_temp,
+              checked_by,
+              checked_at::text AS checked_at,
+              notes,
+              created_at::text AS created_at,
+              updated_at::text AS updated_at
             FROM kitchen_packet_logs
             WHERE event_id::text = ${eventId}
               AND company_id::text = ${currentUser.company_id}
@@ -387,7 +411,7 @@ export async function POST(
   context: RouteContext,
 ): Promise<NextResponse> {
   try {
-    const currentUser = await getSafeCurrentUser(request);
+    const currentUser = await getSafeCurrentUser();
     const { eventId } = await context.params;
     const body = await readJsonBody<KitchenPacketLogBody>(request);
 
@@ -420,7 +444,9 @@ export async function POST(
     const deliveryTemp = cleanNullableString(
       body.deliveryTemp ?? body.delivery_temp,
     );
-    const checkedBy = cleanNullableString(body.checkedBy ?? body.checked_by);
+    const checkedBy =
+      cleanNullableString(body.checkedBy ?? body.checked_by) ??
+      currentUser.email;
     const notes = cleanNullableString(body.notes);
     const eventRecipeLineId = cleanNullableString(
       body.eventRecipeLineId ?? body.event_recipe_line_id,
@@ -482,7 +508,7 @@ export async function POST(
       );
     }
 
-    const insertedRows = await sql`
+    const insertedRows = (await sql`
       INSERT INTO kitchen_packet_logs (
         company_id,
         event_id,
@@ -512,15 +538,34 @@ export async function POST(
         ${loadingTemp},
         ${deliveryTemp},
         ${checkedBy},
-        NOW(),
+        CASE
+          WHEN ${status} IN ('CHECKED', 'COMPLETED') THEN NOW()
+          ELSE NULL
+        END,
         ${notes},
         NOW(),
         NOW()
       )
-      RETURNING *;
-    `;
+      RETURNING
+        id,
+        company_id,
+        event_id,
+        event_recipe_line_id,
+        checklist_type,
+        item_name,
+        status,
+        food_type,
+        kitchen_temp,
+        loading_temp,
+        delivery_temp,
+        checked_by,
+        checked_at::text AS checked_at,
+        notes,
+        created_at::text AS created_at,
+        updated_at::text AS updated_at;
+    `) as unknown as KitchenPacketLogRow[];
 
-    const insertedLog = mapLog(insertedRows[0] as KitchenPacketLogRow);
+    const insertedLog = mapLog(insertedRows[0]);
 
     return NextResponse.json({
       success: true,

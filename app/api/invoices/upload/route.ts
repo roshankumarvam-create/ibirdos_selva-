@@ -24,6 +24,7 @@ type CurrentSession = {
   email?: string;
   role?: string;
   company_id?: string;
+  companyId?: string;
 };
 
 type InvoiceLineCategory =
@@ -56,6 +57,7 @@ type AzureDocument = {
 type AzureAnalyzeOperation = {
   status?: string;
   analyzeResult?: {
+    content?: string;
     documents?: AzureDocument[];
   };
   error?: {
@@ -77,6 +79,7 @@ type ExtractedInvoiceLine = {
 type ExtractedInvoice = {
   vendorName: string;
   invoiceNumber: string;
+  trackingNumber: string;
   invoiceDate: string | null;
   invoiceTotal: number;
   lines: ExtractedInvoiceLine[];
@@ -145,6 +148,35 @@ function getErrorMessage(error: unknown): string {
   return "Invoice upload failed";
 }
 
+function isDuplicateInvoiceError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+
+  const possibleError = error as {
+    code?: unknown;
+    message?: unknown;
+    constraint_name?: unknown;
+    constraint?: unknown;
+  };
+
+  const code = typeof possibleError.code === "string" ? possibleError.code : "";
+  const message =
+    typeof possibleError.message === "string" ? possibleError.message : "";
+  const constraintName =
+    typeof possibleError.constraint_name === "string"
+      ? possibleError.constraint_name
+      : typeof possibleError.constraint === "string"
+        ? possibleError.constraint
+        : "";
+
+  return (
+    code === "23505" ||
+    message.includes("invoices_company_vendor_invoice_unique") ||
+    constraintName.includes("invoices_company_vendor_invoice_unique")
+  );
+}
+
 function toNumber(value: string | number | null | undefined): number {
   if (typeof value === "number") {
     return Number.isFinite(value) ? value : 0;
@@ -170,6 +202,31 @@ function roundMoney(value: number): number {
 
 function cleanText(value: string | null | undefined): string {
   return (value ?? "").trim();
+}
+
+function extractTrackingNumberFromText(value: string): string {
+  const text = cleanText(value);
+  const match =
+    text.match(/Tracking\s*#?\s*:?\s*(\d{5,})/i) ||
+    text.match(/Tracking\s+(\d{5,})/i) ||
+    text.match(/Order\s*#?\s*:?\s*(\d{5,})/i);
+
+  return match?.[1] ?? "";
+}
+
+function makeFinalInvoiceNumber(invoiceNumber: string, trackingNumber: string): string {
+  const cleanInvoiceNumber = cleanText(invoiceNumber);
+  const cleanTrackingNumber = cleanText(trackingNumber);
+
+  if (cleanInvoiceNumber) {
+    return cleanInvoiceNumber;
+  }
+
+  if (cleanTrackingNumber) {
+    return `TRACK-${cleanTrackingNumber.replace(/^TRACK-/i, "")}`;
+  }
+
+  return "";
 }
 
 function safeCell(row: string[], index: number): string {
@@ -378,6 +435,7 @@ function parseCsvInvoice(
     return {
       vendorName: "Unknown Vendor",
       invoiceNumber: "",
+      trackingNumber: extractTrackingNumberFromText(fallbackFileName),
       invoiceDate: null,
       invoiceTotal: 0,
       lines: [
@@ -433,6 +491,12 @@ function parseCsvInvoice(
     "invoice",
     "invoiceid",
   ]);
+  const trackingNumberIndex = columnIndex([
+    "tracking",
+    "trackingnumber",
+    "trackingid",
+    "ordernumber",
+  ]);
   const invoiceDateIndex = columnIndex(["invoicedate", "date"]);
 
   const lines: ExtractedInvoiceLine[] = bodyRows.map((row) => {
@@ -481,6 +545,10 @@ function parseCsvInvoice(
   return {
     vendorName: cleanText(safeCell(firstDataRow, vendorIndex)) || "Uploaded Vendor",
     invoiceNumber: cleanText(safeCell(firstDataRow, invoiceNumberIndex)),
+    trackingNumber:
+      cleanText(safeCell(firstDataRow, trackingNumberIndex)) ||
+      extractTrackingNumberFromText(fileText) ||
+      extractTrackingNumberFromText(fallbackFileName),
     invoiceDate: normalizeDate(cleanText(safeCell(firstDataRow, invoiceDateIndex))),
     invoiceTotal,
     lines,
@@ -556,6 +624,7 @@ function extractInvoiceData(
 ): ExtractedInvoice {
   const document = azureResult.analyzeResult?.documents?.[0];
   const fields = document?.fields;
+  const fullText = azureResult.analyzeResult?.content ?? "";
 
   const vendorName =
     getFieldText(getField(fields, "VendorName")) ||
@@ -565,6 +634,12 @@ function extractInvoiceData(
   const invoiceNumber =
     getFieldText(getField(fields, "InvoiceId")) ||
     getFieldText(getField(fields, "InvoiceNumber"));
+
+  const trackingNumber =
+    getFieldText(getField(fields, "TrackingNumber")) ||
+    getFieldText(getField(fields, "TrackingId")) ||
+    extractTrackingNumberFromText(fullText) ||
+    extractTrackingNumberFromText(fallbackFileName);
 
   const invoiceDate = normalizeDate(
     getFieldText(getField(fields, "InvoiceDate")),
@@ -658,6 +733,7 @@ function extractInvoiceData(
   return {
     vendorName,
     invoiceNumber,
+    trackingNumber,
     invoiceDate,
     invoiceTotal: invoiceTotal > 0 ? invoiceTotal : calculatedTotal,
     lines: cleanLines,
@@ -697,16 +773,16 @@ export async function POST(
   request: NextRequest,
 ): Promise<NextResponse<UploadResponse>> {
   try {
-    const session = getSessionFromRequest(request) as CurrentSession | null;
+    const session = (await getSessionFromRequest(request)) as CurrentSession | null;
+    const companyId = session?.company_id ?? session?.companyId ?? "";
 
-    if (!session?.company_id) {
+    if (!companyId) {
       return NextResponse.json(
         { success: false, error: "Unauthorized: missing company_id" },
         { status: 401 },
       );
     }
 
-    const companyId = session.company_id;
     const formData = await request.formData();
     const fileValue = formData.get("file");
 
@@ -769,6 +845,39 @@ export async function POST(
       extracted = extractInvoiceData(azureResult, fileName);
     }
 
+    const finalInvoiceNumber = makeFinalInvoiceNumber(
+      extracted.invoiceNumber,
+      extracted.trackingNumber,
+    );
+
+    if (!finalInvoiceNumber) {
+      return NextResponse.json(
+        { success: false, error: "Invoice number or tracking number is required." },
+        { status: 400 },
+      );
+    }
+
+    const duplicateRows = await sql<{ id: string }[]>`
+      SELECT id::text
+      FROM invoices
+      WHERE company_id::text = ${companyId}
+        AND LOWER(TRIM(vendor_name)) = LOWER(TRIM(${extracted.vendorName}))
+        AND TRIM(invoice_number) = TRIM(${finalInvoiceNumber})
+      LIMIT 1
+    `;
+
+    if (duplicateRows[0]) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Duplicate invoice: this vendor invoice number already exists.",
+          invoiceId: duplicateRows[0].id,
+          redirectUrl: `/invoices/${duplicateRows[0].id}`,
+        },
+        { status: 409 },
+      );
+    }
+
     const result: {
       invoice: InsertedInvoiceRow;
       lines: InsertedLineRow[];
@@ -792,7 +901,7 @@ export async function POST(
           ${invoiceId},
           ${companyId},
           ${extracted.vendorName},
-          ${extracted.invoiceNumber || null},
+          ${finalInvoiceNumber},
           ${extracted.invoiceDate},
           ${extracted.invoiceTotal}::numeric,
           'needs_review',
@@ -882,6 +991,16 @@ export async function POST(
       lines: result.lines.map(formatLine),
     });
   } catch (error: unknown) {
+    if (isDuplicateInvoiceError(error)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Duplicate invoice: this vendor invoice number already exists.",
+        },
+        { status: 409 },
+      );
+    }
+
     return NextResponse.json(
       {
         success: false,

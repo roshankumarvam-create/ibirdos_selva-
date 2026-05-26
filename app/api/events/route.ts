@@ -265,7 +265,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const guestCount =
       getNumber(body.guestCount) ?? getNumber(body.guest_count) ?? 0;
 
-    const status = getString(body.status) ?? "draft";
+    const status = (getString(body.status) ?? "DRAFT").toUpperCase();
 
     const serviceType =
       getString(body.serviceType) ?? getString(body.service_type) ?? "catering";

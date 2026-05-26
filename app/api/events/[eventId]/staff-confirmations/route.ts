@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import postgres from "postgres";
-import { getSessionFromRequest } from "@/app/lib/server-auth";
+import { getCurrentUser } from "@/app/lib/currentUser";
 
 export const dynamic = "force-dynamic";
 
@@ -38,13 +38,6 @@ type CurrentUser = {
   email: string;
   role: string;
   company_id: string;
-};
-
-type SessionUser = {
-  user_id?: string;
-  email?: string;
-  role?: string;
-  company_id?: string;
 };
 
 type StaffConfirmationBody = {
@@ -148,37 +141,30 @@ async function readJsonBody<TBody>(request: NextRequest): Promise<TBody> {
   }
 }
 
-async function getSafeCurrentUser(request: NextRequest): Promise<CurrentUser> {
-  const session = (await getSessionFromRequest(request)) as SessionUser | null;
+async function getSafeCurrentUser(): Promise<CurrentUser> {
+  const currentUser = (await getCurrentUser()) as Partial<CurrentUser> | null;
 
   if (
-    !session ||
-    typeof session.user_id !== "string" ||
-    typeof session.email !== "string" ||
-    typeof session.role !== "string" ||
-    typeof session.company_id !== "string" ||
-    session.company_id.trim().length === 0
+    !currentUser ||
+    typeof currentUser.id !== "string" ||
+    typeof currentUser.email !== "string" ||
+    typeof currentUser.company_id !== "string" ||
+    currentUser.company_id.trim().length === 0
   ) {
     throw new UnauthorizedError();
   }
 
   return {
-    id: session.user_id,
-    email: session.email,
-    role: session.role,
-    company_id: session.company_id,
+    id: currentUser.id,
+    email: currentUser.email,
+    role: typeof currentUser.role === "string" ? currentUser.role : "user",
+    company_id: currentUser.company_id,
   };
 }
 
 async function ensureStaffConfirmationTable(): Promise<void> {
   await sql`
     CREATE EXTENSION IF NOT EXISTS pgcrypto;
-  `;
-
-  await sql`
-    ALTER TABLE events
-    ADD COLUMN IF NOT EXISTS company_id UUID,
-    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
   `;
 
   await sql`
@@ -214,28 +200,8 @@ async function ensureStaffConfirmationTable(): Promise<void> {
   `;
 
   await sql`
-    CREATE INDEX IF NOT EXISTS idx_staff_confirmations_company_id
-    ON staff_confirmations(company_id);
-  `;
-
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_staff_confirmations_event_id
-    ON staff_confirmations(event_id);
-  `;
-
-  await sql`
     CREATE INDEX IF NOT EXISTS idx_staff_confirmations_company_event
     ON staff_confirmations(company_id, event_id);
-  `;
-
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_staff_confirmations_company_event_station
-    ON staff_confirmations(company_id, event_id, station);
-  `;
-
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_staff_confirmations_company_event_status
-    ON staff_confirmations(company_id, event_id, status);
   `;
 }
 
@@ -283,8 +249,10 @@ export async function GET(
   request: NextRequest,
   context: RouteContext,
 ): Promise<NextResponse> {
+  void request;
+
   try {
-    const currentUser = await getSafeCurrentUser(request);
+    const currentUser = await getSafeCurrentUser();
     const { eventId } = await context.params;
 
     await ensureStaffConfirmationTable();
@@ -320,17 +288,14 @@ export async function GET(
         station,
         confirmation_type,
         status,
-        confirmed_at,
+        confirmed_at::text AS confirmed_at,
         notes,
-        created_at,
-        updated_at
+        created_at::text AS created_at,
+        updated_at::text AS updated_at
       FROM staff_confirmations
       WHERE company_id::text = ${currentUser.company_id}
         AND event_id::text = ${eventId}
-      ORDER BY
-        station ASC,
-        staff_name ASC,
-        confirmation_type ASC;
+      ORDER BY station ASC, staff_name ASC, confirmation_type ASC;
     `) as unknown as StaffConfirmationRow[];
 
     const summaryRows = await sql`
@@ -345,12 +310,10 @@ export async function GET(
         AND event_id::text = ${eventId};
     `;
 
-    const confirmations = confirmationRows.map(mapConfirmation);
-
     return NextResponse.json({
       success: true,
       eventId,
-      confirmations,
+      confirmations: confirmationRows.map(mapConfirmation),
       summary: summaryRows[0] ?? {
         total: 0,
         pending: 0,
@@ -378,7 +341,7 @@ export async function POST(
   context: RouteContext,
 ): Promise<NextResponse> {
   try {
-    const currentUser = await getSafeCurrentUser(request);
+    const currentUser = await getSafeCurrentUser();
     const { eventId } = await context.params;
     const body = await readJsonBody<StaffConfirmationBody>(request);
 
@@ -409,90 +372,64 @@ export async function POST(
 
     if (!staffName) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "Staff name is required",
-        },
+        { success: false, error: "Staff name is required" },
         { status: 400 },
       );
     }
 
     if (!station) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "Station is required",
-        },
+        { success: false, error: "Station is required" },
         { status: 400 },
       );
     }
 
     if (!isStaffConfirmationType(confirmationType)) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "Invalid confirmation type",
-        },
+        { success: false, error: "Invalid confirmation type" },
         { status: 400 },
       );
     }
 
     if (!isStaffConfirmationStatus(status)) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "Invalid confirmation status",
-        },
+        { success: false, error: "Invalid confirmation status" },
         { status: 400 },
       );
     }
 
-    const existingRows = await sql`
-      SELECT id
-      FROM staff_confirmations
+    const updatedRows = (await sql`
+      UPDATE staff_confirmations
+      SET
+        status = ${status},
+        confirmed_at = CASE
+          WHEN ${status} = 'CONFIRMED' THEN NOW()
+          ELSE NULL
+        END,
+        notes = ${notes},
+        updated_at = NOW()
       WHERE company_id::text = ${currentUser.company_id}
         AND event_id::text = ${eventId}
+        AND COALESCE(event_recipe_line_id::text, '') = COALESCE(${eventRecipeLineId}, '')
         AND staff_name = ${staffName}
         AND station = ${station}
         AND confirmation_type = ${confirmationType}
-        AND (
-          (${eventRecipeLineId}::text IS NULL AND event_recipe_line_id IS NULL)
-          OR event_recipe_line_id::text = ${eventRecipeLineId}
-        )
-      LIMIT 1;
-    `;
+      RETURNING
+        id,
+        company_id,
+        event_id,
+        event_recipe_line_id,
+        staff_name,
+        station,
+        confirmation_type,
+        status,
+        confirmed_at::text AS confirmed_at,
+        notes,
+        created_at::text AS created_at,
+        updated_at::text AS updated_at;
+    `) as unknown as StaffConfirmationRow[];
 
-    if (existingRows.length > 0) {
-      const existingId = String(existingRows[0].id);
-
-      const updatedRows = (await sql`
-        UPDATE staff_confirmations
-        SET
-          status = ${status},
-          notes = ${notes},
-          confirmed_at = CASE
-            WHEN ${status} = 'CONFIRMED' THEN NOW()
-            ELSE NULL
-          END,
-          updated_at = NOW()
-        WHERE id::text = ${existingId}
-          AND event_id::text = ${eventId}
-          AND company_id::text = ${currentUser.company_id}
-        RETURNING
-          id,
-          company_id,
-          event_id,
-          event_recipe_line_id,
-          staff_name,
-          station,
-          confirmation_type,
-          status,
-          confirmed_at,
-          notes,
-          created_at,
-          updated_at;
-      `) as unknown as StaffConfirmationRow[];
-
+    if (updatedRows.length > 0) {
       return NextResponse.json({
         success: true,
         eventId,
@@ -539,10 +476,10 @@ export async function POST(
         station,
         confirmation_type,
         status,
-        confirmed_at,
+        confirmed_at::text AS confirmed_at,
         notes,
-        created_at,
-        updated_at;
+        created_at::text AS created_at,
+        updated_at::text AS updated_at;
     `) as unknown as StaffConfirmationRow[];
 
     return NextResponse.json({
@@ -568,7 +505,7 @@ export async function PATCH(
   context: RouteContext,
 ): Promise<NextResponse> {
   try {
-    const currentUser = await getSafeCurrentUser(request);
+    const currentUser = await getSafeCurrentUser();
     const { eventId } = await context.params;
     const body = await readJsonBody<UpdateStaffConfirmationBody>(request);
 
@@ -592,20 +529,14 @@ export async function PATCH(
 
     if (!id) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "Confirmation id is required",
-        },
+        { success: false, error: "Confirmation id is required" },
         { status: 400 },
       );
     }
 
     if (!isStaffConfirmationStatus(status)) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "Invalid confirmation status",
-        },
+        { success: false, error: "Invalid confirmation status" },
         { status: 400 },
       );
     }
@@ -632,18 +563,15 @@ export async function PATCH(
         station,
         confirmation_type,
         status,
-        confirmed_at,
+        confirmed_at::text AS confirmed_at,
         notes,
-        created_at,
-        updated_at;
+        created_at::text AS created_at,
+        updated_at::text AS updated_at;
     `) as unknown as StaffConfirmationRow[];
 
     if (updatedRows.length === 0) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "Confirmation not found",
-        },
+        { success: false, error: "Confirmation not found" },
         { status: 404 },
       );
     }

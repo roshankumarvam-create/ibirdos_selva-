@@ -34,6 +34,13 @@ type RecipesApiResponse = {
   error?: string;
 };
 
+type DeleteRecipeResponse = { 
+  success: boolean;
+  deletedRecipeId?: string; 
+  deletedRecipeName?: string | null;
+  error?: string
+};
+
 const categoryOptions = [
   "All",
   "Appetizer",
@@ -133,6 +140,7 @@ function getMarginStatus(margin: string | number | null | undefined): {
 }
 
 export default function RecipesPage() {
+  const [deletingRecipeId, setDeletingRecipeId] = useState<string>("");
   const [recipes, setRecipes] = useState<RecipeRow[]>([]);
   const [role, setRole] = useState<RecipeRole>("");
   const [canCreateRecipe, setCanCreateRecipe] = useState<boolean>(false);
@@ -243,6 +251,53 @@ export default function RecipesPage() {
     setMarginFilter(event.target.value);
   }
 
+  async function deleteRecipe(recipeId: string, recipeName: string): Promise<void> {
+  const confirmed = window.confirm(
+    `Delete "${recipeName}"? This cannot be undone.`,
+  );
+
+  if (!confirmed) {
+    return;
+  }
+
+  setDeletingRecipeId(recipeId);
+  setError("");
+  postMessage("");
+
+  try {
+    const response = await fetch(`/api/recipes/${recipeId}/delete`, {
+      method: "DELETE",
+    });
+
+    const responseText = await response.text();
+
+    const data: DeleteRecipeResponse = responseText.trim().length > 0 
+    ? (JSON.parse(responseText) as DeleteRecipeResponse)
+    : {
+       success: false, 
+       error: "Delete API returned empty response.",
+       };
+       
+    if (!response.ok || !data.success) {
+      throw new Error(data.error ?? "Recipe could not be deleted.");
+    }
+
+    setRecipes((currentRecipes) =>
+      currentRecipes.filter((recipe) => recipe.id !== recipeId),
+    );
+
+    postMessage("Recipe deleted successfully.");
+  } catch (caughtError) {
+    const messageText =
+      caughtError instanceof Error
+        ? caughtError.message
+        : "Recipe could not be deleted.";
+
+    setError(messageText);
+  } finally {
+    setDeletingRecipeId("");
+  }
+}
   return (
     <main className="min-h-screen bg-[#f7f1e6] px-4 py-6 text-[#051f14]">
       <div className="mx-auto max-w-7xl">
@@ -514,14 +569,30 @@ export default function RecipesPage() {
                               </Link>
                             ) : null}
 
-                            {canPrintRecipe ? (
-                              <Link
-                                href={`/recipes/${recipe.id}/print`}
-                                className="rounded-full border border-[#052e1c] px-4 py-2 text-xs font-black text-[#052e1c]"
-                              >
-                                Print PDF
-                              </Link>
-                            ) : null}
+                            {canPrintRecipe ? ( 
+                              <> 
+                               <Link 
+                                  href={`/recipes/${recipe.id}/print`} 
+                                  className="rounded-full border border-[#052e1c] px-4 py-2 text-xs font-black text-[#052e1c]"
+                              > 
+                                Print PDF 
+                              </Link> 
+
+                              <button 
+                                 suppressHydrationWarning 
+                                 type="button" 
+                                 disabled={deletingRecipeId === recipe.id} 
+                                 onClick={(event) => { 
+                                 event.preventDefault(); 
+                                 event.stopPropagation(); 
+                                 void deleteRecipe(recipe.id, recipe.name ?? "Untitled Recipe"); 
+                               }} 
+                                className="rounded-full bg-red-600 px-5 py-3 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-60" 
+                               > 
+                                {deletingRecipeId === recipe.id ? "Deleting..." : "Delete"} 
+                                </button> 
+                              </> // 
+                            ) : null} 
                           </div>
                         </td>
                       </tr>

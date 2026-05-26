@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 
 type PrepStatus = "Not Started" | "In Progress" | "Completed" | "Blocked";
 
@@ -22,6 +22,9 @@ type EventMenuLine = {
   portionUnit: string;
   wasteBufferPercent: number;
   requiredFoodAmount: number;
+  recipeYield: number;
+  batchCount: number;
+  roundedBatchCount: number;
   totalCost: number;
   sellingPrice: number;
   station: string;
@@ -208,7 +211,7 @@ const staffConfirmationActions: Array<{
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function readString(value: unknown, fallback: string): string {
@@ -230,6 +233,7 @@ function readNumber(value: unknown, fallback: number): number {
 
   if (typeof value === "string") {
     const parsed = Number(value.replace(/[$,%]/g, ""));
+
     return Number.isFinite(parsed) ? parsed : fallback;
   }
 
@@ -287,6 +291,10 @@ function formatPercent(value: number): string {
   return `${value.toFixed(2)}%`;
 }
 
+function formatBatch(value: number): string {
+  return Number.isInteger(value) ? value.toString() : value.toFixed(2);
+}
+
 function formatDateTime(value: string | null): string {
   if (!value) {
     return "Not confirmed";
@@ -332,6 +340,34 @@ function normalizeEventMenuLine(value: unknown): EventMenuLine | null {
     return null;
   }
 
+  const prepPortions = readNumber(
+    value.prepPortions ??
+      value.prep_portions ??
+      value.kitchenPrepPortions ??
+      value.kitchen_prep_portions,
+    0,
+  );
+
+  const portionSize = readNumber(value.portionSize ?? value.portion_size, 1);
+
+  const requiredFoodAmount =
+    readNumber(value.requiredFoodAmount ?? value.required_food_amount, 0) ||
+    prepPortions * portionSize;
+
+  const recipeYield =
+    readNumber(value.recipeYield ?? value.recipe_yield, 0) || 1;
+
+  const safeRecipeYield = recipeYield > 0 ? recipeYield : 1;
+
+  const batchCount =
+    readNumber(value.batchCount ?? value.batch_count, 0) ||
+    prepPortions / safeRecipeYield;
+
+  const roundedBatchCount =
+    readNumber(value.roundedBatchCount ?? value.rounded_batch_count, 0) ||
+    readNumber(value.kitchenBatches ?? value.kitchen_batches, 0) ||
+    Math.ceil(batchCount);
+
   return {
     id,
     recipeName,
@@ -343,23 +379,17 @@ function normalizeEventMenuLine(value: unknown): EventMenuLine | null {
       value.customerPortions ?? value.customer_portions,
       0,
     ),
-    prepPortions: readNumber(
-      value.prepPortions ??
-        value.prep_portions ??
-        value.kitchenPrepPortions ??
-        value.kitchen_prep_portions,
-      0,
-    ),
-    portionSize: readNumber(value.portionSize ?? value.portion_size, 1),
+    prepPortions,
+    portionSize,
     portionUnit: readString(value.portionUnit ?? value.portion_unit, "portion"),
     wasteBufferPercent: readNumber(
       value.wasteBufferPercent ?? value.waste_buffer_percent,
       0,
     ),
-    requiredFoodAmount: readNumber(
-      value.requiredFoodAmount ?? value.required_food_amount,
-      0,
-    ),
+    requiredFoodAmount,
+    recipeYield: safeRecipeYield,
+    batchCount,
+    roundedBatchCount,
     totalCost: readNumber(value.totalCost ?? value.total_cost, 0),
     sellingPrice: readNumber(value.sellingPrice ?? value.selling_price, 0),
     station: readString(
@@ -602,9 +632,13 @@ export default function KitchenPacketPage() {
       id: line.id,
       name: line.recipeName,
       station: line.station,
+      customerPortions: line.customerPortions,
       prepPortions: line.prepPortions,
       requiredFoodAmount: line.requiredFoodAmount,
       portionUnit: line.portionUnit,
+      recipeYield: line.recipeYield,
+      batchCount: line.batchCount,
+      roundedBatchCount: line.roundedBatchCount,
       status: line.prepStatus,
     }));
   }, [eventMenuLines]);
@@ -1017,61 +1051,67 @@ export default function KitchenPacketPage() {
   }
 
   async function saveTemperatureLogItem(itemId: string): Promise<void> {
-  const item = tempLogItems.find((currentItem) => currentItem.id === itemId);
+    const item = tempLogItems.find((currentItem) => currentItem.id === itemId);
 
-  if (!item) {
-    return;
-  }
-
-  setLogSavingItemName(item.itemName);
-  setError("");
-
-  try {
-    const response = await fetch(`/api/events/${eventId}/kitchen-packet-logs`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        eventRecipeLineId: item.id,
-        event_recipe_line_id: item.id,
-        checklistType: "TEMPERATURE_LOG",
-        checklist_type: "TEMPERATURE_LOG",
-        itemName: item.itemName,
-        item_name: item.itemName,
-        status: "CHECKED",
-        foodType: item.foodType,
-        food_type: item.foodType,
-        kitchenTemp: item.kitchenTemp.length > 0 ? item.kitchenTemp.trim() : "165°F", 
-        kitchen_temp: item.kitchenTemp.length > 0 ? item.kitchenTemp.trim() : "165°F", 
-        loadingTemp: item.loadingTemp.length > 0 ? item.loadingTemp.trim() : "155°F", 
-        loading_temp: item.loadingTemp.length > 0 ? item.loadingTemp.trim() : "155°F", 
-        deliveryTemp: item.deliveryTemp.length > 0 ? item.deliveryTemp.trim() : "145°F", 
-        delivery_temp: item.deliveryTemp.length > 0 ? item.deliveryTemp.trim() : "145°F", 
-        checkedBy: item.checkedBy.trim() || staffName.trim() || "Chef Test", 
-        checked_by: item.checkedBy.trim() || staffName.trim() || "Chef Test", 
-        notes: `Temperature log saved for ${item.itemName}.`,
-      }),
-    });
-
-    const data = (await response.json()) as KitchenPacketLogPostResponse;
-
-    if (!response.ok || !data.success) {
-      throw new Error(data.error ?? "Failed to save temperature log.");
+    if (!item) {
+      return;
     }
 
-    await loadKitchenPacketLogs();
-  } catch (caughtError) {
-    const message =
-      caughtError instanceof Error
-        ? caughtError.message
-        : "Something went wrong saving temperature log.";
+    setLogSavingItemName(item.itemName);
+    setError("");
 
-    setError(message);
-  } finally {
-    setLogSavingItemName("");
+    try {
+      const response = await fetch(`/api/events/${eventId}/kitchen-packet-logs`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          eventRecipeLineId: item.id,
+          event_recipe_line_id: item.id,
+          checklistType: "TEMPERATURE_LOG",
+          checklist_type: "TEMPERATURE_LOG",
+          itemName: item.itemName,
+          item_name: item.itemName,
+          status: "CHECKED",
+          foodType: item.foodType,
+          food_type: item.foodType,
+          kitchenTemp:
+            item.kitchenTemp.length > 0 ? item.kitchenTemp.trim() : "165°F",
+          kitchen_temp:
+            item.kitchenTemp.length > 0 ? item.kitchenTemp.trim() : "165°F",
+          loadingTemp:
+            item.loadingTemp.length > 0 ? item.loadingTemp.trim() : "155°F",
+          loading_temp:
+            item.loadingTemp.length > 0 ? item.loadingTemp.trim() : "155°F",
+          deliveryTemp:
+            item.deliveryTemp.length > 0 ? item.deliveryTemp.trim() : "145°F",
+          delivery_temp:
+            item.deliveryTemp.length > 0 ? item.deliveryTemp.trim() : "145°F",
+          checkedBy: item.checkedBy.trim() || staffName.trim() || "Chef Test",
+          checked_by: item.checkedBy.trim() || staffName.trim() || "Chef Test",
+          notes: `Temperature log saved for ${item.itemName}.`,
+        }),
+      });
+
+      const data = (await response.json()) as KitchenPacketLogPostResponse;
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error ?? "Failed to save temperature log.");
+      }
+
+      await loadKitchenPacketLogs();
+    } catch (caughtError) {
+      const message =
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Something went wrong saving temperature log.";
+
+      setError(message);
+    } finally {
+      setLogSavingItemName("");
+    }
   }
-}
 
   function getConfirmationForAction(
     confirmationType: StaffConfirmationType,
@@ -1193,6 +1233,149 @@ export default function KitchenPacketPage() {
       suppressHydrationWarning
       className="min-h-screen bg-[#f8f4ec] px-4 py-6 md:px-6 md:py-8"
     >
+      <style jsx global>{`
+        @media print {
+          @page {
+            size: letter portrait;
+            margin: 0.35in;
+          }
+
+          html,
+          body {
+            background: #ffffff !important;
+            color: #111827 !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+
+          body * {
+            box-shadow: none !important;
+          }
+
+          main {
+            background: #ffffff !important;
+            padding: 0 !important;
+            margin: 0 !important;
+          }
+
+          button,
+          a,
+          [role="button"],
+          .no-print,
+          .fixed,
+          iframe {
+            display: none !important;
+          }
+
+          .mx-auto,
+          .max-w-6xl,
+          .space-y-6,
+          .space-y-8 {
+            max-width: 100% !important;
+            width: 100% !important;
+            margin: 0 !important;
+            gap: 8px !important;
+          }
+
+          section,
+          .rounded-3xl,
+          .rounded-2xl {
+            border: 1px solid #d6d3d1 !important;
+            border-radius: 8px !important;
+            padding: 10px !important;
+            margin-bottom: 8px !important;
+            background: #ffffff !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+
+          h1 {
+            font-size: 22px !important;
+            line-height: 1.2 !important;
+            margin: 0 0 4px 0 !important;
+          }
+
+          h2 {
+            font-size: 16px !important;
+            line-height: 1.2 !important;
+            margin: 0 0 6px 0 !important;
+          }
+
+          h3,
+          p,
+          span,
+          label,
+          td,
+          th,
+          div {
+            font-size: 10px !important;
+            line-height: 1.25 !important;
+          }
+
+          .text-3xl,
+          .text-2xl,
+          .text-xl {
+            font-size: 14px !important;
+            line-height: 1.2 !important;
+          }
+
+          .grid {
+            gap: 6px !important;
+          }
+
+          table {
+            width: 100% !important;
+            border-collapse: collapse !important;
+            font-size: 9px !important;
+          }
+
+          th,
+          td {
+            padding: 5px !important;
+            border: 1px solid #e5e7eb !important;
+            vertical-align: top !important;
+          }
+
+          input,
+          select,
+          textarea {
+            border: none !important;
+            background: transparent !important;
+            padding: 0 !important;
+            font-size: 10px !important;
+            appearance: none !important;
+            -webkit-appearance: none !important;
+          }
+
+          .overflow-x-auto {
+            overflow: visible !important;
+          }
+
+          .min-w-\\[1200px\\],
+          .min-w-\\[1100px\\],
+          .min-w-\\[1000px\\],
+          .min-w-\\[900px\\],
+          .min-w-\\[800px\\] {
+            min-width: 0 !important;
+            width: 100% !important;
+          }
+
+          .bg-red-50,
+          .bg-green-50,
+          .bg-yellow-100,
+          .bg-gray-100,
+          .bg-\\[\\#fbf7ef\\] {
+            background: #ffffff !important;
+          }
+
+          .text-red-700,
+          .text-green-700,
+          .text-yellow-800 {
+            color: #111827 !important;
+          }
+        }
+      `}</style>
+
       <div className="mx-auto max-w-6xl space-y-6">
         <section className="rounded-3xl border border-[#eadfce] bg-white p-5 shadow-sm md:p-6">
           <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
@@ -1290,13 +1473,18 @@ export default function KitchenPacketPage() {
 
           {eventMenuLines.length > 0 ? (
             <div className="mt-4 overflow-x-auto rounded-2xl border border-[#eadfce]">
-              <table className="w-full min-w-[1000px] text-left text-sm">
+              <table className="w-full min-w-[1200px] text-left text-sm">
                 <thead className="bg-[#fbf7ef] text-[#6b7280]">
                   <tr>
                     <th className="px-4 py-3 font-semibold">Recipe</th>
                     <th className="px-4 py-3 font-semibold">Category</th>
                     <th className="px-4 py-3 font-semibold">Customer</th>
                     <th className="px-4 py-3 font-semibold">Kitchen Prep</th>
+                    <th className="px-4 py-3 font-semibold">Yield</th>
+                    <th className="px-4 py-3 font-semibold">Batch Count</th>
+                    <th className="px-4 py-3 font-semibold">
+                      Kitchen Batches
+                    </th>
                     <th className="px-4 py-3 font-semibold">Station</th>
                     <th className="px-4 py-3 font-semibold">Status</th>
                     <th className="px-4 py-3 font-semibold">Update</th>
@@ -1320,6 +1508,18 @@ export default function KitchenPacketPage() {
                         <span className="block text-xs text-[#6b7280]">
                           {line.requiredFoodAmount.toFixed(2)} {line.portionUnit}
                         </span>
+                      </td>
+                      <td className="px-4 py-3 text-[#111827]">
+                        {line.recipeYield}
+                        <span className="block text-xs text-[#6b7280]">
+                          portions
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-[#111827]">
+                        {formatBatch(line.batchCount)}
+                      </td>
+                      <td className="px-4 py-3 font-bold text-[#111827]">
+                        {line.roundedBatchCount}
                       </td>
                       <td className="px-4 py-3 text-[#111827]">
                         {line.station}
@@ -1380,26 +1580,40 @@ export default function KitchenPacketPage() {
                     <p className="mt-1 text-sm text-[#6b7280]">
                       Station: {item.station}
                     </p>
+                    <p className="mt-1 text-xs text-[#6b7280]">
+                      Customer Portions: {item.customerPortions} · Prep
+                      Portions: {item.prepPortions}
+                    </p>
                   </div>
 
-                  <div className="text-sm text-[#111827] md:text-right">
+                  <div className="grid gap-2 text-sm text-[#111827] md:grid-cols-4 md:text-right">
                     <p>
-                      <span className="font-semibold">Prep Portions:</span>{" "}
-                      {item.prepPortions}
+                      <span className="block font-semibold">Yield</span>
+                      {item.recipeYield}
                     </p>
                     <p>
-                      <span className="font-semibold">Required Amount:</span>{" "}
-                      {item.requiredFoodAmount.toFixed(2)} {item.portionUnit}
+                      <span className="block font-semibold">Batch Count</span>
+                      {formatBatch(item.batchCount)}
                     </p>
                     <p>
-                      <span className="font-semibold">Status:</span>{" "}
+                      <span className="block font-semibold">
+                        Kitchen Batches
+                      </span>
+                      {item.roundedBatchCount}
+                    </p>
+                    <p>
+                      <span className="block font-semibold">Status</span>
                       <span
-                        className={`rounded-xl px-3 py-2 text-xs font-semibold ${getPrepStatusClass(
+                        className={`inline-flex rounded-xl px-3 py-2 text-xs font-semibold ${getPrepStatusClass(
                           item.status,
                         )}`}
                       >
                         {item.status}
                       </span>
+                    </p>
+                    <p className="md:col-span-4">
+                      <span className="font-semibold">Required Amount:</span>{" "}
+                      {item.requiredFoodAmount.toFixed(2)} {item.portionUnit}
                     </p>
                   </div>
                 </div>
@@ -1441,6 +1655,11 @@ export default function KitchenPacketPage() {
                               Prep {line.prepPortions} portions /{" "}
                               {line.requiredFoodAmount.toFixed(2)}{" "}
                               {line.portionUnit}
+                            </p>
+                            <p className="text-xs text-[#6b7280]">
+                              Yield {line.recipeYield} · Batch{" "}
+                              {formatBatch(line.batchCount)} · Kitchen Plan{" "}
+                              {line.roundedBatchCount} batches
                             </p>
                           </div>
 

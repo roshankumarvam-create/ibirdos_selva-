@@ -5,7 +5,7 @@
   "description": "iBirdOS - Kitchen Intelligence Operating System for Catering & Restaurant Operations",
   "author": "ANS Corporation",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",

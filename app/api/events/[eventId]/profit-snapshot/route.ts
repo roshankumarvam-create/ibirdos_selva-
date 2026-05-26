@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import postgres from "postgres";
-import { getSessionFromRequest } from "@/app/lib/server-auth";
+import { getCurrentUser } from "@/app/lib/currentUser";
 
 export const dynamic = "force-dynamic";
 
@@ -23,15 +23,8 @@ type RouteContext = {
 type CurrentUser = {
   id: string;
   email: string;
-  role: string;
-  company_id: string;
-};
-
-type SessionUser = {
-  user_id?: string;
-  email?: string;
   role?: string;
-  company_id?: string;
+  company_id: string;
 };
 
 type ProfitSnapshotBody = {
@@ -84,7 +77,7 @@ type ProfitSnapshotRow = {
 
 class UnauthorizedError extends Error {
   constructor() {
-    super("Not authenticated");
+    super("Unauthorized");
     this.name = "UnauthorizedError";
   }
 }
@@ -147,29 +140,26 @@ async function readJsonBody<TBody>(request: NextRequest): Promise<TBody> {
   }
 }
 
-async function getSafeCurrentUser(request: NextRequest): Promise<CurrentUser> {
-  const session = (await getSessionFromRequest(request)) as SessionUser | null;
+async function getSafeCurrentUser(): Promise<CurrentUser> {
+  const currentUser = (await getCurrentUser()) as CurrentUser | null;
 
   if (
-    !session ||
-    typeof session.user_id !== "string" ||
-    typeof session.email !== "string" ||
-    typeof session.role !== "string" ||
-    typeof session.company_id !== "string" ||
-    session.company_id.trim().length === 0
+    !currentUser ||
+    typeof currentUser.company_id !== "string" ||
+    currentUser.company_id.trim().length === 0
   ) {
     throw new UnauthorizedError();
   }
 
   return {
-    id: session.user_id,
-    email: session.email,
-    role: session.role,
-    company_id: session.company_id,
+    id: typeof currentUser.id === "string" ? currentUser.id : "",
+    email: typeof currentUser.email === "string" ? currentUser.email : "",
+    role: typeof currentUser.role === "string" ? currentUser.role : "user",
+    company_id: currentUser.company_id,
   };
 }
 
-async function ensureProfitSnapshotTable(): Promise<void> {
+async function ensureProfitSnapshotTables(): Promise<void> {
   await sql`
     CREATE EXTENSION IF NOT EXISTS pgcrypto;
   `;
@@ -178,6 +168,32 @@ async function ensureProfitSnapshotTable(): Promise<void> {
     ALTER TABLE events
     ADD COLUMN IF NOT EXISTS company_id UUID,
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS event_recipe_lines (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id UUID NOT NULL,
+      event_id UUID NOT NULL,
+      recipe_id UUID,
+      customer_portions NUMERIC DEFAULT 0,
+      selling_price NUMERIC DEFAULT 0,
+      total_cost NUMERIC DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `;
+
+  await sql`
+    ALTER TABLE event_recipe_lines
+    ADD COLUMN IF NOT EXISTS company_id UUID,
+    ADD COLUMN IF NOT EXISTS event_id UUID,
+    ADD COLUMN IF NOT EXISTS recipe_id UUID,
+    ADD COLUMN IF NOT EXISTS customer_portions NUMERIC DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS selling_price NUMERIC DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS total_cost NUMERIC DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
   `;
 
   await sql`
@@ -220,6 +236,11 @@ async function ensureProfitSnapshotTable(): Promise<void> {
     ADD COLUMN IF NOT EXISTS snapshot_type TEXT NOT NULL DEFAULT 'event_page',
     ADD COLUMN IF NOT EXISTS notes TEXT,
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+  `;
+
+  await sql`
+    CREATE INDEX IF NOT EXISTS event_recipe_lines_company_event_idx
+    ON event_recipe_lines(company_id, event_id);
   `;
 
   await sql`
@@ -319,11 +340,13 @@ export async function GET(
   request: NextRequest,
   context: RouteContext,
 ): Promise<NextResponse> {
+  void request;
+
   try {
-    const currentUser = await getSafeCurrentUser(request);
+    const currentUser = await getSafeCurrentUser();
     const { eventId } = await context.params;
 
-    await ensureProfitSnapshotTable();
+    await ensureProfitSnapshotTables();
 
     const hasAccess = await ensureEventAccess(eventId, currentUser.company_id);
 
@@ -357,7 +380,7 @@ export async function GET(
         guest_count,
         snapshot_type,
         notes,
-        created_at
+        created_at::text AS created_at
       FROM event_pnl_snapshots
       WHERE company_id::text = ${currentUser.company_id}
         AND event_id::text = ${eventId}
@@ -390,11 +413,11 @@ export async function POST(
   context: RouteContext,
 ): Promise<NextResponse> {
   try {
-    const currentUser = await getSafeCurrentUser(request);
+    const currentUser = await getSafeCurrentUser();
     const { eventId } = await context.params;
     const body = await readJsonBody<ProfitSnapshotBody>(request);
 
-    await ensureProfitSnapshotTable();
+    await ensureProfitSnapshotTables();
 
     const hasAccess = await ensureEventAccess(eventId, currentUser.company_id);
 
@@ -402,6 +425,8 @@ export async function POST(
       return NextResponse.json(
         {
           success: false,
+          eventId,
+          snapshot: null,
           error: "Event not found",
         },
         { status: 404 },
@@ -486,7 +511,7 @@ export async function POST(
         guest_count,
         snapshot_type,
         notes,
-        created_at;
+        created_at::text AS created_at;
     `) as unknown as ProfitSnapshotRow[];
 
     const snapshot = mapSnapshot(insertedRows[0]);
@@ -502,6 +527,7 @@ export async function POST(
     return NextResponse.json(
       {
         success: false,
+        snapshot: null,
         error: getErrorMessage(error),
       },
       { status: getResponseStatus(error) },

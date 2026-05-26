@@ -526,6 +526,7 @@ export default function NewRecipePage() {
 
               <button
                 type="button"
+                suppressHydrationWarning
                 onClick={addIngredient}
                 className="rounded-full bg-[#052e1c] px-5 py-3 text-sm font-bold text-white"
               >
@@ -641,6 +642,7 @@ export default function NewRecipePage() {
                       Action
                     </label>
                     <button
+                    suppressHydrationWarning
                       type="button"
                       onClick={() => removeIngredient(ingredient.id)}
                       className="mt-2 w-full rounded-2xl border border-red-200 bg-red-50 px-3 py-3 text-sm font-bold text-red-700"
@@ -716,6 +718,7 @@ export default function NewRecipePage() {
             </p>
 
             <button
+              suppressHydrationWarning
               type="submit"
               disabled={isSaving}
               className="rounded-full bg-[#052e1c] px-6 py-4 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-60"

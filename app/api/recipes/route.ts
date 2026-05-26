@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import postgres from "postgres";
-import { getSessionFromRequest } from "@/app/lib/server-auth";
+import { getCurrentUser } from "@/app/lib/currentUser";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -147,7 +147,7 @@ export async function GET(
   request: NextRequest,
 ): Promise<NextResponse<GetApiResponse>> {
   try {
-    const currentUser = await getCurrentUser(request);
+    const currentUser = await getCurrentUser(); 
     await ensureRecipeColumns();
 
     const searchParams = request.nextUrl.searchParams;
@@ -190,7 +190,7 @@ export async function POST(
   request: NextRequest,
 ): Promise<NextResponse<PostApiResponse>> {
   try {
-    const currentUser = await getCurrentUser(request);
+    const currentUser = await getCurrentUser();
     await ensureRecipeColumns();
 
     if (!canManageRecipes(currentUser.role)) {
@@ -396,28 +396,6 @@ export async function POST(
       { status: getStatusCode(error) },
     );
   }
-}
-
-async function getCurrentUser(request: NextRequest): Promise<CurrentUser> {
-  const session = (await getSessionFromRequest(request)) as SessionUser | null;
-
-  if (
-    !session ||
-    typeof session.user_id !== "string" ||
-    typeof session.email !== "string" ||
-    typeof session.role !== "string" ||
-    typeof session.company_id !== "string" ||
-    session.company_id.trim().length === 0
-  ) {
-    throw new Error("Not authenticated");
-  }
-
-  return {
-    id: session.user_id,
-    email: session.email,
-    role: session.role,
-    company_id: session.company_id,
-  };
 }
 
 async function ensureRecipeColumns(): Promise<void> {
